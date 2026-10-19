@@ -636,6 +636,12 @@ Workflows' `ctx.step()` is the place to start; see
 request, and a second CI job builds both halves of `templates/fullstack`. No
 test calls a live Render, GitHub, Postgres, model, or Commons API.
 
+The suite is small on purpose: about a hundred tests, each named for a
+behavior. Tests go through public entry points (HTTP routes, task bodies,
+exported functions), fake only the systems at the edge, and assert what a
+user or operator would see, not how the code gets there. Where it is cheap,
+they run the real thing: git, tar, and a shell in temporary directories.
+
 Most modules have a matching file in `tests/`:
 
 - **Contracts and generation:** `blueprint.test.ts` is the contract for
@@ -646,11 +652,11 @@ Most modules have a matching file in `tests/`:
   agent gets which tools. `policy.test.ts` covers `checkToolCall()`, path
   resolution, the MCP allowlist, and redaction. `tools.test.ts` covers the
   sandbox tools.
-- **Git and files:** `git.test.ts` runs real `git` in temporary
-  directories to check what a commit holds, how pushes recover, and how app
-  files are packed and written. `files.test.ts` checks which tar entries
-  `appFiles()` accepts. `github-auth.test.ts` covers the GitHub App and token
-  paths.
+- **Git and files:** `git.test.ts` runs real `git` against a local remote
+  to check what a commit holds, which pushes are refused, and how a push
+  recovers when another run pushed first. `files.test.ts` copies an app's
+  files between two real clones and checks which files are refused.
+  `github-auth.test.ts` covers the GitHub App and token paths.
 - **Render and the outside world:** `render.test.ts`, `teardown.test.ts`,
   and `images.test.ts` use stubbed `fetch` responses.
 - **The gateway:** `gateway.test.ts` covers authentication, validation,
@@ -663,7 +669,7 @@ Most modules have a matching file in `tests/`:
   order are tested.
 - **Processes and state:** `host.test.ts` starts `app/host.ts` in a real
   Node process against a fake task server to prove every task registers.
-  `store.test.ts` checks Postgres connection error handling with fake
-  clients.
+  `store.test.ts` checks, with fake clients, that a run claim holds its
+  lock and that a lost Postgres connection does not crash the process.
 
 To run one file: `npx vitest run tests/blueprint.test.ts`.

@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+/**
+ * The gateway through its HTTP API. Postgres (the store module) and Render
+ * Workflows (the SDK) are the boundaries, and both are fakes.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	claimDelete: vi.fn(),
@@ -45,578 +49,34 @@ vi.mock("@renderinc/sdk", () => ({
 }));
 
 const { createGateway } = await import("../app/gateway.js");
+const { RUN_STAGES } =
+	await vi.importActual<typeof import("../app/store.js")>("../app/store.js");
 
 const KEY = "0123456789abcdef0123456789abcdef";
 const PROMPT = "Create an online catalog to sell handcrafted furniture";
 const RUN_ID = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
 const UI_AUTH = `Basic ${Buffer.from("demo:a-long-demo-password").toString("base64")}`;
+const BEARER = `Bearer ${KEY}`;
 
-function post(body: unknown, opts: { key?: string | null } = {}) {
-	const headers: Record<string, string> = { "content-type": "application/json" };
-	if (opts.key !== null) headers.authorization = `Bearer ${opts.key ?? KEY}`;
-
-	return createGateway().request("/v1/apps", {
-		method: "POST",
+function request(
+	path: string,
+	init: { method?: string; authorization?: string; body?: unknown } = {},
+) {
+	const headers: Record<string, string> = {};
+	if (init.authorization) headers.authorization = init.authorization;
+	if (init.body !== undefined) headers["content-type"] = "application/json";
+	return createGateway().request(path, {
+		method: init.method ?? "GET",
 		headers,
-		body: typeof body === "string" ? body : JSON.stringify(body),
+		body:
+			init.body === undefined || typeof init.body === "string"
+				? init.body
+				: JSON.stringify(init.body),
 	});
 }
 
-beforeEach(() => {
-	vi.clearAllMocks();
-	mocks.claimRun.mockResolvedValue({ claimed: true });
-	mocks.claimDelete.mockResolvedValue({ claimed: true, runIds: [RUN_ID] });
-	mocks.deleteRunWithoutApp.mockResolvedValue(true);
-	mocks.failDelete.mockResolvedValue(undefined);
-	mocks.setDeleteWorkflowRunId.mockResolvedValue(undefined);
-	mocks.finishRun.mockResolvedValue(undefined);
-	mocks.listRunsByUser.mockResolvedValue([]);
-	mocks.ping.mockResolvedValue(undefined);
-	mocks.startTask.mockResolvedValue({ taskRunId: "trn-1" });
-	mocks.claimWorkflowCheck.mockResolvedValue(false);
-	mocks.setWorkflowRunId.mockResolvedValue(undefined);
-	mocks.workflowIdOfTaskRun.mockResolvedValue("wfl-1");
-
-	process.env.FACTORY_API_KEY = KEY;
-	process.env.UI_USERNAME = "demo";
-	process.env.UI_PASSWORD = "a-long-demo-password";
-	process.env.RENDER_WORKFLOW_SLUG = "wfs-1";
-	delete process.env.UI_AUTH_DISABLED;
-	delete process.env.NODE_ENV;
-	delete process.env.RENDER_USE_LOCAL_DEV;
-});
-
-describe("health", () => {
-	it("reports liveness without touching Postgres", async () => {
-		const response = await createGateway().request("/health");
-		expect(response.status).toBe(200);
-		expect(mocks.ping).not.toHaveBeenCalled();
-	});
-
-	it("reports 503 when Postgres is unreachable", async () => {
-		mocks.ping.mockRejectedValue(new Error("down"));
-		const response = await createGateway().request("/ready");
-		expect(response.status).toBe(503);
-	});
-});
-
-describe("authentication", () => {
-	it("rejects a request with no bearer token before claiming a run", async () => {
-		const response = await post({ prompt: PROMPT }, { key: null });
-		expect(response.status).toBe(401);
-		expect(mocks.claimRun).not.toHaveBeenCalled();
-	});
-
-	it("rejects a wrong bearer token", async () => {
-		const response = await post({ prompt: PROMPT }, { key: "nope" });
-		expect(response.status).toBe(401);
-	});
-
-	// RFC 6750 gives 400 for a header that is not a bearer token.
-	it("rejects an authorization header that is not a bearer token", async () => {
-		const response = await createGateway().request("/v1/apps", {
-			method: "POST",
-			headers: { authorization: UI_AUTH, "content-type": "application/json" },
-			body: JSON.stringify({ prompt: PROMPT }),
-		});
-		expect(response.status).toBe(400);
-		expect(mocks.claimRun).not.toHaveBeenCalled();
-	});
-
-	it("rejects a body over the size cap", async () => {
-		const response = await post(JSON.stringify({ padding: "x".repeat(70 * 1024) }));
-		expect(response.status).toBe(413);
-	});
-
-	it("guards the status route too", async () => {
-		const response = await createGateway().request(
-			"/v1/apps/6f9619ff-8b86-d011-b42d-00cf4fc964ff",
-		);
-		expect(response.status).toBe(401);
-		expect(mocks.getRun).not.toHaveBeenCalled();
-	});
-});
-
-describe("validation", () => {
-	it("rejects malformed JSON", async () => {
-		const response = await post("{not json");
-		expect(response.status).toBe(400);
-	});
-
-	it.each([
-		["a prompt that is too short", { prompt: "hi" }],
-		["no prompt at all", { user: "demo" }],
-		["a user that is not a slug", { prompt: PROMPT, user: "../etc" }],
-	])("rejects %s", async (_label, body) => {
-		const response = await post(body);
-		expect(response.status).toBe(400);
-		expect(mocks.startTask).not.toHaveBeenCalled();
-	});
-});
-
-describe("dispatch", () => {
-	it("claims the run and starts the workflow task", async () => {
-		const response = await post({ prompt: PROMPT, user: "demo" });
-
-		expect(response.status).toBe(202);
-		expect(mocks.claimRun).toHaveBeenCalledWith(
-			expect.objectContaining({ prompt: PROMPT, user: "demo" }),
-		);
-		expect(mocks.startTask).toHaveBeenCalledWith("wfs-1/prompt-to-app", [
-			expect.objectContaining({ prompt: PROMPT, user: "demo" }),
-		]);
-	});
-
-	it("returns the original run for a repeated idempotency key", async () => {
-		mocks.claimRun.mockResolvedValue({
-			claimed: false,
-			reason: "duplicate",
-			runId: "run-1",
-		});
-		const response = await post({ prompt: PROMPT, idempotencyKey: "same-key-1" });
-
-		expect(response.status).toBe(200);
-		expect(await response.json()).toMatchObject({
-			runId: "run-1",
-			duplicate: true,
-		});
-		expect(mocks.startTask).not.toHaveBeenCalled();
-	});
-
-	it("refuses work when too many runs are already going", async () => {
-		mocks.claimRun.mockResolvedValue({ claimed: false, reason: "at_capacity" });
-		const response = await post({ prompt: PROMPT });
-
-		expect(response.status).toBe(429);
-		// The UI shows the detail below the prompt.
-		expect(await response.json()).toEqual({
-			error: "too many concurrent runs",
-			detail:
-				"The factory builds at most 3 apps at a time, for all users. Submit the prompt again when a run finishes.",
-		});
-		expect(mocks.startTask).not.toHaveBeenCalled();
-	});
-
-	it("releases the claim when dispatch fails so a retry can succeed", async () => {
-		mocks.startTask.mockRejectedValue(new Error("render unavailable"));
-		const response = await post({ prompt: PROMPT });
-
-		expect(response.status).toBe(502);
-		expect(mocks.finishRun).toHaveBeenCalledWith(
-			expect.any(String),
-			"failed",
-			expect.objectContaining({ summary: "dispatch failed" }),
-		);
-	});
-
-	it("fails when the workflow slug is not configured", async () => {
-		process.env.RENDER_WORKFLOW_SLUG = "";
-		const response = await post({ prompt: PROMPT });
-		expect(response.status).toBe(502);
-	});
-});
-
-describe("browser UI", () => {
-	const authorization = `Basic ${Buffer.from("demo:a-long-demo-password").toString("base64")}`;
-
-	it("requires the UI username to be a namespace-safe slug", () => {
-		process.env.UI_USERNAME = "Demo User";
-		expect(() => createGateway()).toThrow(
-			"UI_USERNAME must be a lowercase slug",
-		);
-	});
-
-	it("requires Basic Auth for the page", async () => {
-		const denied = await createGateway().request("/");
-		expect(denied.status).toBe(401);
-
-		const response = await createGateway().request("/", {
-			headers: { authorization },
-		});
-		expect(response.status).toBe(200);
-		expect(await response.text()).toContain("<title>Vibe Code Demo</title>");
-	});
-
-	it("lists each run stage in order, with a tooltip that says where it runs", async () => {
-		const { RUN_STAGES } =
-			await vi.importActual<typeof import("../app/store.js")>("../app/store.js");
-		const response = await createGateway().request("/", {
-			headers: { authorization },
-		});
-		const items = [
-			...(await response.text()).matchAll(/<li data-stage="([a-z_]+)">[\s\S]*?<\/li>/g),
-		];
-
-		expect(items.map(([, stage]) => stage)).toEqual(RUN_STAGES);
-		for (const [item, stage] of items) {
-			expect(item).toContain(`aria-describedby="stage-tip-${stage}"`);
-			expect(item).toContain(`id="stage-tip-${stage}" class="stage-tip" role="tooltip"`);
-			expect(item).toContain('<span class="eyebrow">Runs in</span>');
-		}
-	});
-
-	it.each(["/table", "/table.js", "/runs.js", "/app.js"])(
-		"requires Basic Auth for %s",
-		async (path) => {
-			expect((await createGateway().request(path)).status).toBe(401);
-			const response = await createGateway().request(path, {
-				headers: { authorization },
-			});
-			expect(response.status).toBe(200);
-		},
-	);
-
-	it.each(["/", "/table", "/table.js", "/runs.js", "/app.js", "/style.css"])(
-		"makes the browser revalidate %s after each deploy",
-		async (path) => {
-			const response = await createGateway().request(path, {
-				headers: { authorization },
-			});
-			expect(response.headers.get("cache-control")).toBe("no-cache");
-		},
-	);
-
-	it("explains each run stage in the table view, with its time and its dashboard links", async () => {
-		const { RUN_STAGES } =
-			await vi.importActual<typeof import("../app/store.js")>("../app/store.js");
-		const response = await createGateway().request("/table", {
-			headers: { authorization },
-		});
-		const html = await response.text();
-		const rows = [...html.matchAll(/<tr data-stage="([a-z_]+)">([\s\S]*?)<\/tr>/g)];
-
-		expect(html).toContain('<a class="secondary-button view-switch" href="/">');
-		expect(html).toContain('<th scope="col">Time</th>');
-		expect(rows.map(([, stage]) => stage)).toEqual(RUN_STAGES);
-		for (const [, , cells] of rows) {
-			// The name, the time, what the stage does, where it runs, and its
-			// links. table.js fills the time and the links.
-			const text = [...cells.matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/g)].map(
-				([, content]) => content.replace(/<[^>]+>/g, "").trim(),
-			);
-			expect(text).toHaveLength(5);
-			expect([text[0], text[2], text[3]].every(Boolean)).toBe(true);
-			expect(cells).toContain('<td class="stage-time"></td>');
-			expect(cells).toMatch(/<td class="stage-links" data-links="workflowRun( sandbox)?">/);
-		}
-	});
-
-	it("allows the explicit auth bypass only outside production", async () => {
-		process.env.UI_AUTH_DISABLED = "true";
-		expect((await createGateway().request("/")).status).toBe(200);
-
-		process.env.NODE_ENV = "production";
-		expect((await createGateway().request("/")).status).toBe(401);
-	});
-
-	it("submits without exposing or requiring the factory bearer token", async () => {
-		const response = await createGateway().request("/ui/apps", {
-			method: "POST",
-			headers: { authorization, "content-type": "application/json" },
-			body: JSON.stringify({ prompt: PROMPT, user: "another-user" }),
-		});
-
-		expect(response.status).toBe(202);
-		expect(mocks.startTask).toHaveBeenCalledOnce();
-		expect(mocks.claimRun).toHaveBeenCalledWith(
-			expect.objectContaining({ user: "demo" }),
-		);
-		expect(mocks.setWorkflowRunId).toHaveBeenCalledWith(
-			expect.any(String),
-			"trn-1",
-		);
-		expect(await response.json()).toMatchObject({
-			statusUrl: expect.stringMatching(/^\/ui\/apps\//),
-		});
-	});
-
-	it("lists only runs in the authenticated UI namespace", async () => {
-		const response = await createGateway().request("/ui/apps", {
-			headers: { authorization },
-		});
-
-		expect(response.status).toBe(200);
-		expect(mocks.listRunsByUser).toHaveBeenCalledWith("demo");
-		expect(await response.json()).toEqual({ runs: [] });
-	});
-
-	// The UI polls only the list, so the list marks a run failed when its task
-	// run failed. Else the run keeps a concurrency slot until someone selects it.
-	it("reconciles each run that a task owns before it lists the runs", async () => {
-		const building = storedRun({
-			id: "run-building",
-			status: "running",
-			workflowRunId: "trn-building",
-		});
-		const crashed = storedRun({
-			id: "run-crashed",
-			status: "running",
-			workflowRunId: "trn-crashed",
-		});
-		const deployed = storedRun({ id: "run-deployed" });
-		mocks.listRunsByUser
-			.mockResolvedValueOnce([building, crashed, deployed])
-			.mockResolvedValueOnce([
-				building,
-				{ ...crashed, status: "failed", summary: "Workflow failed: timed out" },
-				deployed,
-			]);
-		mocks.claimWorkflowCheck.mockResolvedValue(true);
-		mocks.getTaskRun.mockImplementation(async (id: string) =>
-			id === "trn-crashed"
-				? { status: "failed", error: "timed out" }
-				: { status: "running" },
-		);
-
-		const response = await createGateway().request("/ui/apps", {
-			headers: { authorization },
-		});
-		const body = (await response.json()) as {
-			runs: { runId: string; status: string }[];
-		};
-
-		expect(mocks.claimWorkflowCheck.mock.calls).toEqual([
-			["run-building"],
-			["run-crashed"],
-		]);
-		expect(mocks.finishRun).toHaveBeenCalledOnce();
-		expect(mocks.finishRun).toHaveBeenCalledWith("run-crashed", "failed", {
-			summary: "Workflow failed: timed out",
-		});
-		expect(body.runs.map((run) => [run.runId, run.status])).toEqual([
-			["run-building", "running"],
-			["run-crashed", "failed"],
-			["run-deployed", "deployed"],
-		]);
-	});
-
-	it("reads the list one time when no task owns a run", async () => {
-		mocks.listRunsByUser.mockResolvedValue([storedRun()]);
-
-		const response = await createGateway().request("/ui/apps", {
-			headers: { authorization },
-		});
-
-		expect(response.status).toBe(200);
-		expect(mocks.listRunsByUser).toHaveBeenCalledOnce();
-		expect(mocks.claimWorkflowCheck).not.toHaveBeenCalled();
-	});
-});
-
-describe("status", () => {
-	it("returns the run, with secret-shaped text redacted", async () => {
-		mocks.getRun.mockResolvedValue({
-			id: "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
-			idempotencyKey: "k",
-			prompt: PROMPT,
-			user: "demo",
-			status: "deployed",
-			stage: "done",
-			// Progress can hold the error of a failed Render read.
-			progress:
-				"The deploy lookup of srv-1 failed (attempt 1 of 5): postgres://user:pw@host/db",
-			stageHistory: [],
-			workflowRunId: "trn-1",
-			appName: "furniture-catalog",
-			webUrl: "https://vibe-demo-furniture-catalog-web.onrender.com",
-			apiUrl: "https://vibe-demo-furniture-catalog-api.onrender.com",
-			blueprintPath: "apps/demo/furniture-catalog/render.yaml",
-			summary: "Wired DATABASE_URL postgres://user:pw@host/db for the API.",
-			createdAt: "2026-01-01T00:00:00.000Z",
-			updatedAt: "2026-01-01T00:10:00.000Z",
-		});
-
-		const response = await createGateway().request(
-			"/v1/apps/6f9619ff-8b86-d011-b42d-00cf4fc964ff",
-			{ headers: { authorization: `Bearer ${KEY}` } },
-		);
-		const body = (await response.json()) as {
-			urls: { web: string };
-			progress: string;
-			summary: string;
-		};
-
-		expect(response.status).toBe(200);
-		expect(body.urls.web).toContain("onrender.com");
-		expect(body.summary).not.toContain("postgres://user:pw@host/db");
-		expect(body.summary).toContain("[REDACTED]");
-		expect(body.progress).toBe(
-			"The deploy lookup of srv-1 failed (attempt 1 of 5): [REDACTED]",
-		);
-	});
-
-	function readV1Run() {
-		return createGateway().request(`/v1/apps/${RUN_ID}`, {
-			headers: { authorization: `Bearer ${KEY}` },
-		});
-	}
-
-	// prompt-to-app writes its result before it returns.
-	it("does not change the row of a task run that succeeded", async () => {
-		mocks.getRun.mockResolvedValue(storedRun({ status: "running" }));
-		mocks.claimWorkflowCheck.mockResolvedValue(true);
-		mocks.getTaskRun.mockResolvedValue({ status: "succeeded", results: [] });
-
-		expect((await readV1Run()).status).toBe(200);
-		expect(mocks.getTaskRun).toHaveBeenCalledWith("trn-1");
-		expect(mocks.finishRun).not.toHaveBeenCalled();
-	});
-
-	it("keeps a run running while its task run is paused", async () => {
-		mocks.getRun.mockResolvedValue(storedRun({ status: "running" }));
-		mocks.claimWorkflowCheck.mockResolvedValue(true);
-		mocks.getTaskRun.mockResolvedValue({ status: "paused", results: [] });
-
-		expect((await readV1Run()).status).toBe(200);
-		expect(mocks.finishRun).not.toHaveBeenCalled();
-	});
-
-	// A timeout stops the task before its catch block can write the failure.
-	it.each(["failed", "canceled"])(
-		"marks a run failed when its task run is %s",
-		async (status) => {
-			mocks.getRun.mockResolvedValue(storedRun({ status: "running" }));
-			mocks.claimWorkflowCheck.mockResolvedValue(true);
-			mocks.getTaskRun.mockResolvedValue({ status, error: "timed out" });
-
-			expect((await readV1Run()).status).toBe(200);
-			expect(mocks.finishRun).toHaveBeenCalledWith(RUN_ID, "failed", {
-				summary: `Workflow ${status}: timed out`,
-			});
-		},
-	);
-
-	// A stage that the run went into again has one more item.
-	it("gives the time that each stage of a run started and stopped", async () => {
-		mocks.getRun.mockResolvedValue(
-			storedRun({
-				stageHistory: [
-					{ stage: "building", startedAt: "2026-01-01T00:02:00.000Z" },
-					{ stage: "verifying", startedAt: "2026-01-01T00:05:00.000Z" },
-					{ stage: "building", startedAt: "2026-01-01T00:06:00.000Z" },
-					{ stage: "smoke_testing", startedAt: "2026-01-01T00:08:00.000Z" },
-				],
-			}),
-		);
-
-		const body = await (await readV1Run()).json();
-
-		// A stage stops when the next one starts, and the last one when the run stops.
-		expect(body.stageHistory).toEqual([
-			{
-				stage: "building",
-				startedAt: "2026-01-01T00:02:00.000Z",
-				finishedAt: "2026-01-01T00:05:00.000Z",
-			},
-			{
-				stage: "verifying",
-				startedAt: "2026-01-01T00:05:00.000Z",
-				finishedAt: "2026-01-01T00:06:00.000Z",
-			},
-			{
-				stage: "building",
-				startedAt: "2026-01-01T00:06:00.000Z",
-				finishedAt: "2026-01-01T00:08:00.000Z",
-			},
-			{
-				stage: "smoke_testing",
-				startedAt: "2026-01-01T00:08:00.000Z",
-				finishedAt: "2026-01-01T00:09:00.000Z",
-			},
-		]);
-	});
-
-	it("gives no stop time to the stage that runs now", async () => {
-		mocks.getRun.mockResolvedValue(
-			storedRun({
-				status: "running",
-				stage: "verifying",
-				finishedAt: null,
-				stageHistory: [
-					{ stage: "designing", startedAt: "2026-01-01T00:00:05.000Z" },
-					{ stage: "verifying", startedAt: "2026-01-01T00:04:00.000Z" },
-				],
-			}),
-		);
-
-		const body = await (await readV1Run()).json();
-
-		expect(body.stageHistory).toEqual([
-			{
-				stage: "designing",
-				startedAt: "2026-01-01T00:00:05.000Z",
-				finishedAt: "2026-01-01T00:04:00.000Z",
-			},
-			{
-				stage: "verifying",
-				startedAt: "2026-01-01T00:04:00.000Z",
-				finishedAt: null,
-			},
-		]);
-	});
-
-	/** Two reads of the run from one gateway, as the polls of the UI do. */
-	async function readTwice() {
-		const gateway = createGateway();
-		const read = async () =>
-			(await (
-				await gateway.request(`/v1/apps/${RUN_ID}`, {
-					headers: { authorization: `Bearer ${KEY}` },
-				})
-			).json()) as { finishedAt: string; links: Record<string, unknown> };
-		return [await read(), await read()];
-	}
-
-	it("links the run to its task run and its sandbox in the Render Dashboard", async () => {
-		mocks.getRun.mockResolvedValue(
-			storedRun({ sandboxId: "sbx-1", sandboxGroupId: "sbg-1" }),
-		);
-
-		const [first, second] = await readTwice();
-
-		// The workflow ID is read after the first response, and only once.
-		expect(first.links.workflowRun).toBeNull();
-		expect(mocks.workflowIdOfTaskRun).toHaveBeenCalledTimes(1);
-		expect(mocks.workflowIdOfTaskRun).toHaveBeenCalledWith("trn-1");
-		expect(second.finishedAt).toBe("2026-01-01T00:09:00.000Z");
-		expect(second.links).toEqual({
-			workflowRun: "https://dashboard.render.com/wf/wfl-1/runs/trn-1",
-			sandbox: "https://dashboard.render.com/sandbox-group/sbg-1/sandboxes/sbx-1",
-		});
-	});
-
-	it("gives no link that it cannot make", async () => {
-		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-		mocks.getRun.mockResolvedValue(storedRun({ sandboxId: "sbx-1" }));
-		mocks.workflowIdOfTaskRun.mockRejectedValue(new Error("403"));
-
-		const [, second] = await readTwice();
-		logged.mockRestore();
-
-		expect(second.links).toEqual({ workflowRun: null, sandbox: null });
-		// A failed read is tried again after a minute, not on each poll.
-		expect(mocks.workflowIdOfTaskRun).toHaveBeenCalledTimes(1);
-	});
-
-	// A local task run is not in the Dashboard.
-	it("gives no workflow link in local development", async () => {
-		process.env.RENDER_USE_LOCAL_DEV = "true";
-		mocks.getRun.mockResolvedValue(storedRun());
-
-		const [, second] = await readTwice();
-
-		expect(second.links.workflowRun).toBeNull();
-		expect(mocks.workflowIdOfTaskRun).not.toHaveBeenCalled();
-	});
-
-	it("404s an id that is not a run id without querying Postgres", async () => {
-		const response = await createGateway().request("/v1/apps/not-a-uuid", {
-			headers: { authorization: `Bearer ${KEY}` },
-		});
-		expect(response.status).toBe(404);
-		expect(mocks.getRun).not.toHaveBeenCalled();
-	});
-});
+const post = (body: unknown, authorization = BEARER) =>
+	request("/v1/apps", { method: "POST", authorization, body });
 
 /** A stored run of the furniture catalog, with some fields replaced. */
 function storedRun(overrides: Record<string, unknown> = {}) {
@@ -644,37 +104,241 @@ function storedRun(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function deleteV1(opts: { key?: string | null } = {}) {
-	const headers: Record<string, string> = {};
-	if (opts.key !== null) headers.authorization = `Bearer ${opts.key ?? KEY}`;
-	return createGateway().request(`/v1/apps/${RUN_ID}`, {
-		method: "DELETE",
-		headers,
-	});
-}
+beforeEach(() => {
+	vi.clearAllMocks();
+	mocks.claimRun.mockResolvedValue({ claimed: true });
+	mocks.claimDelete.mockResolvedValue({ claimed: true, runIds: [RUN_ID] });
+	mocks.claimWorkflowCheck.mockResolvedValue(true);
+	mocks.deleteRunWithoutApp.mockResolvedValue(true);
+	mocks.failDelete.mockResolvedValue(undefined);
+	mocks.finishRun.mockResolvedValue(undefined);
+	mocks.getRun.mockResolvedValue(storedRun());
+	mocks.listRunsByUser.mockResolvedValue([]);
+	mocks.ping.mockResolvedValue(undefined);
+	mocks.setDeleteWorkflowRunId.mockResolvedValue(undefined);
+	mocks.setWorkflowRunId.mockResolvedValue(undefined);
+	mocks.startTask.mockResolvedValue({ taskRunId: "trn-1" });
+	mocks.workflowIdOfTaskRun.mockResolvedValue("wfl-1");
 
-/**
- * A delete removes the app on Render and in the apps repository, and every run
- * of the app. The gateway only claims the runs and dispatches delete-app.
- */
-describe("delete", () => {
-	beforeEach(() => {
-		mocks.getRun.mockResolvedValue(storedRun());
-		mocks.startTask.mockResolvedValue({ taskRunId: "trn-delete" });
-	});
+	process.env.FACTORY_API_KEY = KEY;
+	process.env.UI_USERNAME = "demo";
+	process.env.UI_PASSWORD = "a-long-demo-password";
+	process.env.RENDER_WORKFLOW_SLUG = "wfs-1";
+	delete process.env.UI_AUTH_DISABLED;
+	delete process.env.NODE_ENV;
+	delete process.env.RENDER_USE_LOCAL_DEV;
+});
 
-	it("rejects a request with no bearer token before reading the run", async () => {
-		const response = await deleteV1({ key: null });
-		expect(response.status).toBe(401);
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+describe("health", () => {
+	it("reports liveness without Postgres, and readiness as 503 when Postgres is down", async () => {
+		mocks.ping.mockRejectedValue(new Error("down"));
+
+		expect((await request("/health")).status).toBe(200);
+		expect((await request("/ready")).status).toBe(503);
+	});
+});
+
+describe("POST /v1/apps", () => {
+	it("requires the bearer token on every /v1 route", async () => {
+		expect((await post({ prompt: PROMPT }, "")).status).toBe(401);
+		expect((await post({ prompt: PROMPT }, "Bearer wrong-token")).status).toBe(
+			401,
+		);
+		expect((await request(`/v1/apps/${RUN_ID}`)).status).toBe(401);
+		expect(mocks.claimRun).not.toHaveBeenCalled();
 		expect(mocks.getRun).not.toHaveBeenCalled();
 	});
 
-	it("404s a run that does not exist", async () => {
-		mocks.getRun.mockResolvedValue(null);
-		const response = await deleteV1();
-		expect(response.status).toBe(404);
-		expect(mocks.claimDelete).not.toHaveBeenCalled();
+	// Not JSON, so a body parsed before the cap would get 400.
+	it("rejects a body over the size cap before parsing it", async () => {
+		const response = await post("x".repeat(70 * 1024));
+
+		expect(response.status).toBe(413);
+		expect(mocks.claimRun).not.toHaveBeenCalled();
 	});
+
+	it("rejects an invalid prompt with 400 and starts nothing", async () => {
+		const response = await post({ prompt: "hi" });
+
+		expect(response.status).toBe(400);
+		expect(mocks.claimRun).not.toHaveBeenCalled();
+		expect(mocks.startTask).not.toHaveBeenCalled();
+	});
+
+	it("claims a valid prompt, dispatches prompt-to-app, and returns 202 with a status URL", async () => {
+		const response = await post({ prompt: PROMPT, user: "demo" });
+		const body = await response.json();
+
+		expect(response.status).toBe(202);
+		expect(body.statusUrl).toBe(`/v1/apps/${body.runId}`);
+		expect(mocks.claimRun).toHaveBeenCalledWith(
+			expect.objectContaining({ id: body.runId, prompt: PROMPT, user: "demo" }),
+		);
+		expect(mocks.startTask).toHaveBeenCalledWith("wfs-1/prompt-to-app", [
+			{ prompt: PROMPT, user: "demo", runId: body.runId },
+		]);
+	});
+
+	it("returns the existing run for a repeated idempotency key without dispatching", async () => {
+		mocks.claimRun.mockResolvedValue({
+			claimed: false,
+			reason: "duplicate",
+			runId: "run-1",
+		});
+
+		const response = await post({ prompt: PROMPT, idempotencyKey: "same-key-1" });
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			runId: "run-1",
+			duplicate: true,
+		});
+		expect(mocks.startTask).not.toHaveBeenCalled();
+	});
+
+	it("returns 429 at capacity without dispatching", async () => {
+		mocks.claimRun.mockResolvedValue({ claimed: false, reason: "at_capacity" });
+
+		const response = await post({ prompt: PROMPT });
+
+		expect(response.status).toBe(429);
+		expect(mocks.startTask).not.toHaveBeenCalled();
+	});
+
+	it("releases the claim and returns 502 when the dispatch fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.startTask.mockRejectedValue(new Error("render unavailable"));
+
+		const response = await post({ prompt: PROMPT });
+
+		expect(response.status).toBe(502);
+		const [{ id }] = mocks.claimRun.mock.calls[0];
+		expect(mocks.finishRun).toHaveBeenCalledWith(
+			id,
+			"failed",
+			expect.anything(),
+		);
+	});
+});
+
+describe("browser UI", () => {
+	const pages = ["/", "/table", "/app.js", "/table.js", "/runs.js"];
+
+	it("requires Basic Auth for every UI file and route, and serves no file that holds FACTORY_API_KEY", async () => {
+		for (const path of [...pages, "/style.css", "/ui/apps"]) {
+			expect((await request(path)).status, path).toBe(401);
+		}
+		for (const path of pages) {
+			const response = await request(path, { authorization: UI_AUTH });
+			expect(response.status, path).toBe(200);
+			expect(await response.text(), path).not.toContain(KEY);
+		}
+	});
+
+	it("submits, lists, and deletes only in the Basic Auth user's namespace", async () => {
+		const submitted = await request("/ui/apps", {
+			method: "POST",
+			authorization: UI_AUTH,
+			body: { prompt: PROMPT, user: "another-user" },
+		});
+		expect(submitted.status).toBe(202);
+		expect((await submitted.json()).statusUrl).toMatch(/^\/ui\/apps\//);
+		expect(mocks.startTask).toHaveBeenCalledWith("wfs-1/prompt-to-app", [
+			expect.objectContaining({ user: "demo" }),
+		]);
+
+		mocks.listRunsByUser.mockResolvedValue([storedRun()]);
+		const listed = await request("/ui/apps", { authorization: UI_AUTH });
+		expect((await listed.json()).runs).toHaveLength(1);
+		expect(mocks.listRunsByUser.mock.calls).toEqual([["demo"]]);
+
+		mocks.getRun.mockResolvedValue(storedRun({ user: "acme" }));
+		const deleted = await request(`/ui/apps/${RUN_ID}`, {
+			method: "DELETE",
+			authorization: UI_AUTH,
+		});
+		expect(deleted.status).toBe(404);
+		expect(mocks.claimDelete).not.toHaveBeenCalled();
+		expect(mocks.deleteRunWithoutApp).not.toHaveBeenCalled();
+	});
+
+	it("lists every stage of RUN_STAGES in order in the stage list and the stage table", async () => {
+		const index = await (await request("/", { authorization: UI_AUTH })).text();
+		const items = [
+			...index.matchAll(/<li data-stage="([a-z_]+)">([\s\S]*?)<\/li>/g),
+		];
+		expect(items.map(([, stage]) => stage)).toEqual(RUN_STAGES);
+		for (const [, stage, item] of items) {
+			expect(item, stage).toContain('role="tooltip"');
+		}
+
+		const table = await (
+			await request("/table", { authorization: UI_AUTH })
+		).text();
+		const rows = [
+			...table.matchAll(/<tr data-stage="([a-z_]+)">([\s\S]*?)<\/tr>/g),
+		];
+		expect(rows.map(([, stage]) => stage)).toEqual(RUN_STAGES);
+		for (const [, stage, row] of rows) {
+			expect(row, stage).toContain('class="stage-time"');
+			expect(row, stage).toContain('class="stage-links"');
+		}
+	});
+});
+
+describe("GET /v1/apps/:runId", () => {
+	it("redacts secrets in the summary and the progress", async () => {
+		mocks.getRun.mockResolvedValue(
+			storedRun({
+				progress: "The deploy lookup failed: postgres://user:pw@host/db",
+				summary: "Wired DATABASE_URL postgres://user:pw@host/db for the API.",
+			}),
+		);
+
+		const response = await request(`/v1/apps/${RUN_ID}`, {
+			authorization: BEARER,
+		});
+		const body = await response.json();
+
+		expect(response.status).toBe(200);
+		for (const text of [body.summary, body.progress]) {
+			expect(text).not.toContain("postgres://");
+			expect(text).toContain("[REDACTED]");
+		}
+	});
+
+	// A timeout or a cancel stops the task before its catch block writes the failure.
+	it("marks a running run failed on read when its task run failed or was canceled", async () => {
+		const running = storedRun({ status: "running", finishedAt: null });
+		mocks.getRun.mockResolvedValue(running);
+		mocks.listRunsByUser.mockResolvedValue([running]);
+
+		mocks.getTaskRun.mockResolvedValue({ status: "running" });
+		await request(`/v1/apps/${RUN_ID}`, { authorization: BEARER });
+		expect(mocks.finishRun).not.toHaveBeenCalled();
+
+		mocks.getTaskRun.mockResolvedValue({ status: "failed", error: "timed out" });
+		await request(`/v1/apps/${RUN_ID}`, { authorization: BEARER });
+		expect(mocks.finishRun).toHaveBeenLastCalledWith(RUN_ID, "failed", {
+			summary: expect.stringContaining("timed out"),
+		});
+
+		// The UI polls only the list, so the list reconciles too.
+		mocks.getTaskRun.mockResolvedValue({ status: "canceled" });
+		await request("/ui/apps", { authorization: UI_AUTH });
+		expect(mocks.finishRun).toHaveBeenLastCalledWith(RUN_ID, "failed", {
+			summary: expect.stringContaining("canceled"),
+		});
+	});
+});
+
+describe("DELETE /v1/apps/:runId", () => {
+	const remove = () =>
+		request(`/v1/apps/${RUN_ID}`, { method: "DELETE", authorization: BEARER });
 
 	it("claims every run of the app and dispatches delete-app", async () => {
 		mocks.claimDelete.mockResolvedValue({
@@ -682,153 +346,37 @@ describe("delete", () => {
 			runIds: [RUN_ID, "run-older"],
 		});
 
-		const response = await deleteV1();
+		const response = await remove();
 
 		expect(response.status).toBe(202);
-		expect(await response.json()).toEqual({
-			runId: RUN_ID,
+		expect(await response.json()).toMatchObject({
 			status: "deleting",
-			appName: "furniture-catalog",
 			runIds: [RUN_ID, "run-older"],
-			statusUrl: `/v1/apps/${RUN_ID}`,
 		});
 		expect(mocks.claimDelete).toHaveBeenCalledWith("demo", "furniture-catalog");
 		expect(mocks.startTask).toHaveBeenCalledWith("wfs-1/delete-app", [
 			{ user: "demo", appName: "furniture-catalog" },
 		]);
-		expect(mocks.setDeleteWorkflowRunId).toHaveBeenCalledWith(
-			"demo",
-			"furniture-catalog",
-			"trn-delete",
-		);
 	});
 
 	// The running run would publish the app again after the delete.
-	it("refuses while a run of the app is still running", async () => {
+	it("refuses with 409 while a run of the app is running", async () => {
 		mocks.claimDelete.mockResolvedValue({ claimed: false, reason: "running" });
-		const response = await deleteV1();
-		expect(response.status).toBe(409);
+
+		expect((await remove()).status).toBe(409);
 		expect(mocks.startTask).not.toHaveBeenCalled();
 	});
 
-	it("starts no second task while a delete is in progress", async () => {
-		mocks.claimDelete.mockResolvedValue({
-			claimed: false,
-			reason: "deleting",
-			runIds: [RUN_ID],
-		});
-		const response = await deleteV1();
-		expect(response.status).toBe(202);
-		expect(await response.json()).toMatchObject({ status: "deleting" });
-		expect(mocks.startTask).not.toHaveBeenCalled();
-	});
-
-	it("marks the runs delete_failed when dispatch fails, so a retry can start", async () => {
-		mocks.startTask.mockRejectedValue(new Error("render unavailable"));
-		const response = await deleteV1();
-		expect(response.status).toBe(502);
-		expect(mocks.failDelete).toHaveBeenCalledWith(
-			"demo",
-			"furniture-catalog",
-			expect.stringContaining("Nothing was deleted"),
-		);
-	});
-
-	it("deletes a run that chose no app at once, without a task", async () => {
+	it("deletes a run that chose no app directly, without a task", async () => {
 		mocks.getRun.mockResolvedValue(
 			storedRun({ status: "failed", appName: null, blueprintPath: null }),
 		);
-		const response = await deleteV1();
+
+		const response = await remove();
+
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ runId: RUN_ID, status: "deleted" });
+		expect(await response.json()).toMatchObject({ status: "deleted" });
 		expect(mocks.deleteRunWithoutApp).toHaveBeenCalledWith(RUN_ID);
-		expect(mocks.claimDelete).not.toHaveBeenCalled();
 		expect(mocks.startTask).not.toHaveBeenCalled();
-	});
-
-	it("refuses a run that chose no app yet and is still running", async () => {
-		mocks.getRun.mockResolvedValue(
-			storedRun({ status: "running", appName: null, blueprintPath: null }),
-		);
-		mocks.deleteRunWithoutApp.mockResolvedValue(false);
-		const response = await deleteV1();
-		expect(response.status).toBe(409);
-	});
-
-	describe("from the browser UI", () => {
-		function deleteUi(
-			headers: Record<string, string> = { authorization: UI_AUTH },
-		) {
-			return createGateway().request(`/ui/apps/${RUN_ID}`, {
-				method: "DELETE",
-				headers,
-			});
-		}
-
-		it("requires Basic Auth", async () => {
-			const response = await deleteUi({});
-			expect(response.status).toBe(401);
-			expect(mocks.getRun).not.toHaveBeenCalled();
-		});
-
-		it("deletes a run in the UI namespace without the factory bearer token", async () => {
-			const response = await deleteUi();
-			expect(response.status).toBe(202);
-			expect(await response.json()).toMatchObject({
-				statusUrl: `/ui/apps/${RUN_ID}`,
-			});
-		});
-
-		it("404s a run in a different namespace", async () => {
-			mocks.getRun.mockResolvedValue(storedRun({ user: "acme" }));
-			const response = await deleteUi();
-			expect(response.status).toBe(404);
-			expect(mocks.claimDelete).not.toHaveBeenCalled();
-			expect(mocks.startTask).not.toHaveBeenCalled();
-		});
-	});
-
-	describe("status", () => {
-		function readV1() {
-			return createGateway().request(`/v1/apps/${RUN_ID}`, {
-				headers: { authorization: `Bearer ${KEY}` },
-			});
-		}
-
-		it("marks the runs delete_failed when the delete task failed", async () => {
-			mocks.getRun.mockResolvedValue(
-				storedRun({ status: "deleting", workflowRunId: "trn-delete" }),
-			);
-			mocks.claimWorkflowCheck.mockResolvedValue(true);
-			mocks.getTaskRun.mockResolvedValue({ status: "failed", error: "boom" });
-
-			const response = await readV1();
-
-			expect(response.status).toBe(200);
-			expect(mocks.getTaskRun).toHaveBeenCalledWith("trn-delete");
-			// Only the runs of this task: a newer delete can own them now.
-			expect(mocks.failDelete).toHaveBeenCalledWith(
-				"demo",
-				"furniture-catalog",
-				"Delete failed: boom",
-				"trn-delete",
-			);
-			expect(mocks.finishRun).not.toHaveBeenCalled();
-		});
-
-		it("404s a run that a finished delete removed", async () => {
-			mocks.getRun
-				.mockResolvedValueOnce(
-					storedRun({ status: "deleting", workflowRunId: "trn-delete" }),
-				)
-				.mockResolvedValue(null);
-			mocks.claimWorkflowCheck.mockResolvedValue(true);
-			mocks.getTaskRun.mockResolvedValue({ status: "succeeded", results: [] });
-
-			const response = await readV1();
-
-			expect(response.status).toBe(404);
-			expect(mocks.failDelete).not.toHaveBeenCalled();
-		});
 	});
 });

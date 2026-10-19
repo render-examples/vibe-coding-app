@@ -208,6 +208,11 @@ scaffold: the manifest it returns is what gets deployed.
 - Comments explain intent and constraints, not what the next line does.
 - Add or update tests with every behavior change. Tests never call live
   Render, GitHub, Postgres, model, or Commons APIs.
+- Test behavior, not implementation: go through public entry points, fake
+  only the systems at the edge, and assert what a user or operator sees, not
+  exact messages, SQL text, or call counts. One test per behavior, named as a
+  sentence. Keep the suite near a hundred tests; replace a test rather than
+  add a near-duplicate.
 - Helpers that outgrow a file belong in a new `app/<concern>.ts`, not in a
   subdirectory.
 
