@@ -45,6 +45,13 @@ describe("agent definitions", () => {
 		);
 	});
 
+	// The workflow runs the deploy manager only for failed deploys, so it has
+	// no answer that sends a run to the smoke checks.
+	it("asks the deploy manager only for failures", () => {
+		expect(agents.deployManager.prompt).toContain('"failures"');
+		expect(agents.deployManager.prompt).not.toContain("allHealthy");
+	});
+
 	// Verification deletes ignored files before it builds. A builder that does
 	// not know this keeps source in dist/ and loses it.
 	it("tells the builder that build output is not committed", () => {

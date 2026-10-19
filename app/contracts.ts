@@ -181,8 +181,11 @@ export const deployFailureSchema = z.object({
 	logs: z.string().max(8000).optional(),
 });
 
+/**
+ * The workflow runs the deploy manager only when Render reported a failed
+ * deploy, so the diagnosis cannot declare the services healthy.
+ */
 export const deployDiagnosisSchema = z.object({
-	allHealthy: z.boolean(),
 	failures: z.array(deployFailureSchema).max(10),
 });
 

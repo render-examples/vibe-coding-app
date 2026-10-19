@@ -4,8 +4,8 @@
  * Templates live in this repository rather than in a repository of their own,
  * which keeps them version-locked to the code that deploys them: a template
  * that assumes `preDeployCommand` cannot drift away from a `blueprint.ts` that
- * emits it, and `npm run check` builds them in CI, which is the only thing
- * that keeps a template working.
+ * emits it, and the `templates` job in CI builds them, which is the only
+ * thing that keeps a template working.
  *
  * They are materialized as one self-extracting shell script rather than a file
  * at a time. Every file goes through `sandbox.writeFile`, which costs two API
@@ -86,10 +86,8 @@ export function extractionScript(
 		if (file.contents.split("\n").some((line) => line === HEREDOC)) {
 			throw new Error(`${file.path} contains the heredoc delimiter`);
 		}
-		// A heredoc always terminates its last line, so a file that does not end
-		// in a newline gains one. Every template file is source that should end
-		// in one anyway; this makes the normalization deliberate rather than a
-		// surprise in the diff.
+		// A heredoc always ends its last line, so a file without a final newline
+		// gains one.
 		lines.push(
 			`cat > ${shellEscape(file.path)} <<'${HEREDOC}'`,
 			file.contents.replace(/\n$/, ""),

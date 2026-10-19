@@ -115,7 +115,7 @@ export function resolveSandboxPath(
 	};
 }
 
-/** Lexical resolution of `.` and `..`. The sandbox has no symlinks we follow. */
+/** Lexical resolution of `.` and `..`. It does not follow symbolic links. */
 function normalizePosix(path: string): string {
 	const absolute = path.startsWith("/");
 	const parts: string[] = [];

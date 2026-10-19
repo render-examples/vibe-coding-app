@@ -185,6 +185,37 @@ export async function waitForDeploy(
 	return { deployId, status: `timed out while ${status}`, result: "timed_out" };
 }
 
+/**
+ * The newest deploy of each named service that exists, keyed by service
+ * name. Read it before a push: after the push, the newest deploy of a service
+ * stays the one from before until Render creates the new one, so this is the
+ * `after` of waitForDeploy(). A service that does not exist yet, or that has
+ * no deploy, is absent. A read that fails is tried again, as retryRead()
+ * describes.
+ */
+export async function latestDeploys(
+	workspaceId: string,
+	names: readonly string[],
+): Promise<Map<string, string>> {
+	const wanted = new Set(names);
+	const services = await retryRead("The service lookup", () =>
+		listServices(workspaceId, names),
+	);
+	const deploys = new Map<string, string>();
+	await Promise.all(
+		services
+			.filter((service) => wanted.has(service.name))
+			.map(async (service) => {
+				const deploy = await retryRead(
+					`The deploy lookup of ${service.id}`,
+					() => latestDeploy(service.id),
+				);
+				if (deploy) deploys.set(service.name, deploy.id);
+			}),
+	);
+	return deploys;
+}
+
 /** The newest deploy of a service, or null when it has none. */
 async function latestDeploy(
 	serviceId: string,

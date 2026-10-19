@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	fetchDeployLogs,
 	findBlueprint,
+	latestDeploys,
 	pageContains,
 	pageScripts,
 	waitForDeploy,
@@ -287,6 +288,101 @@ describe("waitForServices", () => {
 
 		expect([...services.keys()]).toEqual([web.name]);
 		expect(urls).toHaveLength(2);
+	});
+});
+
+/**
+ * Read before a push. After it, the newest deploy of a service stays the
+ * deploy from before until Render creates the new one.
+ */
+describe("latestDeploys", () => {
+	const web = { id: "srv-web", name: "acme-demo-shop-web" };
+	const api = { id: "srv-api", name: "acme-demo-shop-api" };
+
+	/**
+	 * The service list gets `services`, and the deploys of a service get its
+	 * entry of `deploys`, or the next error status of `failures` first.
+	 */
+	function serve(
+		services: (typeof web)[],
+		deploys: Record<string, Deploy | null>,
+		failures: number[] = [],
+	): URL[] {
+		const urls: URL[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (url: string | URL | Request) => {
+				const request = new URL(String(url));
+				urls.push(request);
+				const failure = failures.shift();
+				if (failure) return new Response("", { status: failure });
+				if (request.pathname === "/v1/services") {
+					return Response.json(
+						services.map((service) => ({ service, cursor: "c" })),
+					);
+				}
+				const serviceId = request.pathname.match(
+					/^\/v1\/services\/([^/]+)\/deploys$/,
+				)?.[1];
+				const deploy = serviceId ? deploys[serviceId] : undefined;
+				if (deploy === undefined) throw new Error(`Unexpected request to ${url}`);
+				return Response.json(deploy ? [{ deploy, cursor: "c" }] : []);
+			}),
+		);
+		return urls;
+	}
+
+	async function read(names: string[]) {
+		const [deploys] = await Promise.all([
+			latestDeploys("tea-test", names),
+			vi.runAllTimersAsync(),
+		]);
+		return deploys;
+	}
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.stubEnv("RENDER_API_KEY", "rnd_test");
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+	});
+
+	it("gives the newest deploy of each service that exists, by name", async () => {
+		const urls = serve([web, api], {
+			"srv-web": { id: "dep-web0", status: "live" },
+			"srv-api": { id: "dep-api0", status: "pre_deploy_failed" },
+		});
+
+		expect(await read([web.name, api.name])).toEqual(
+			new Map([
+				[web.name, "dep-web0"],
+				[api.name, "dep-api0"],
+			]),
+		);
+		expect(urls[0].searchParams.get("ownerId")).toBe("tea-test");
+		expect(urls[0].searchParams.getAll("name")).toEqual([web.name, api.name]);
+	});
+
+	// The first deploy of a new service is a result of the push.
+	it("leaves out a service that does not exist yet or has no deploy", async () => {
+		serve([web, { ...api, name: `${api.name}-2` }], {
+			"srv-web": null,
+			"srv-api": { id: "dep-api0", status: "live" },
+		});
+
+		expect(await read([web.name, api.name])).toEqual(new Map());
+	});
+
+	it("reads again after a read fails", async () => {
+		serve([web], { "srv-web": { id: "dep-web0", status: "live" } }, [503]);
+
+		expect(await read([web.name])).toEqual(new Map([[web.name, "dep-web0"]]));
 	});
 });
 

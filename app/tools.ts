@@ -211,8 +211,9 @@ export const sandboxApplyPatch: Tool<typeof applyPatchSchema> = {
 		const patchPath = `/tmp/.vibe-${Date.now()}-${++patchCounter}.patch`;
 		await ctx.sandbox.upload(patchPath, input.diff);
 
+		const patch = shellEscape(patchPath);
 		const { output, exitCode } = await ctx.sandbox.run(
-			`cd ${shellEscape(cwd.path)} && git apply --whitespace=nowarn ${patchPath} && rm ${patchPath}`,
+			`(cd ${shellEscape(cwd.path)} && git apply --whitespace=nowarn ${patch}); status=$?; rm -f ${patch}; exit $status`,
 		);
 		if (exitCode !== 0) {
 			return {

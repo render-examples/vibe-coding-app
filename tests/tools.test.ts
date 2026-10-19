@@ -1,4 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { execSync } from "node:child_process";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecResult, Sandbox } from "../app/sandbox.js";
 import {
 	sandboxApplyPatch,
@@ -213,5 +224,96 @@ describe("sandbox__apply_patch", () => {
 
 		expect(out.isError).toBe(true);
 		expect(out.content).toContain("does not apply");
+	});
+
+	/**
+	 * The command runs in a real shell here, with real git, in a temporary
+	 * directory. A failed patch once stayed in /tmp.
+	 */
+	describe("in a shell", () => {
+		const temporary: string[] = [];
+
+		afterEach(() => {
+			for (const dir of temporary.splice(0)) {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		/**
+		 * A sandbox that runs each command on this machine, and the patch files
+		 * it got. A git hook that runs the tests sets GIT_DIR, which would send
+		 * git apply to the outer repository.
+		 */
+		function shellSandbox() {
+			const env = Object.fromEntries(
+				Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+			);
+			const uploaded: string[] = [];
+			const sandbox: Partial<Sandbox> = {
+				upload: vi.fn(async (path: string, data: string | Buffer) => {
+					uploaded.push(path);
+					writeFileSync(path, data);
+				}),
+				run: vi.fn(async (command: string): Promise<ExecResult> => {
+					try {
+						return {
+							output: execSync(command, { encoding: "utf8", env, stdio: "pipe" }),
+							exitCode: 0,
+						};
+					} catch (error) {
+						const failed = error as { status?: number; stderr?: string };
+						return { output: failed.stderr ?? "", exitCode: failed.status ?? 1 };
+					}
+				}),
+			};
+			return { sandbox, uploaded };
+		}
+
+		function appDir(): string {
+			const dir = realpathSync(mkdtempSync(join(tmpdir(), "patch-test-")));
+			temporary.push(dir);
+			writeFileSync(join(dir, "index.html"), "old\n");
+			return dir;
+		}
+
+		const diff = [
+			"--- a/index.html",
+			"+++ b/index.html",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			"",
+		].join("\n");
+
+		it("applies the patch and removes the patch file", async () => {
+			const dir = appDir();
+			const { sandbox, uploaded } = shellSandbox();
+
+			const out = await sandboxApplyPatch.invoke(
+				{ diff },
+				context(sandbox, dir),
+			);
+
+			expect(out.content).toBe("Patch applied successfully.");
+			expect(readFileSync(join(dir, "index.html"), "utf8")).toBe("new\n");
+			expect(uploaded).toHaveLength(1);
+			expect(existsSync(uploaded[0])).toBe(false);
+		});
+
+		it("removes the patch file of a patch that fails, and gives the exit code of git", async () => {
+			const dir = appDir();
+			const { sandbox, uploaded } = shellSandbox();
+
+			const out = await sandboxApplyPatch.invoke(
+				{ diff: diff.replace("-old", "-missing") },
+				context(sandbox, dir),
+			);
+
+			expect(out.isError).toBe(true);
+			expect(out.content).toMatch(/^Patch failed \(exit 1\):\n/);
+			expect(out.content).toContain("patch does not apply");
+			expect(readFileSync(join(dir, "index.html"), "utf8")).toBe("old\n");
+			expect(existsSync(uploaded[0])).toBe(false);
+		});
 	});
 });

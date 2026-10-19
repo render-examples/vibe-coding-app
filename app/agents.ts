@@ -216,9 +216,8 @@ export const deployManager: Agent = {
 		builder what to fix. Be specific: quote the exact error from the logs.
 		If the logs do not show the cause, say so.
 
-		Respond ONLY with JSON:
+		Respond ONLY with JSON, with one entry for each service that failed:
 		{
-		  "allHealthy": false,
 		  "failures": [
 		    {
 		      "serviceName": "the service that failed",
@@ -228,9 +227,6 @@ export const deployManager: Agent = {
 		    }
 		  ]
 		}
-
-		If all services are healthy, respond with:
-		{ "allHealthy": true, "failures": [] }
 	`,
 };
 

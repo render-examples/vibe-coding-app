@@ -4,7 +4,7 @@ import {
 	githubToken,
 	resetTokenCache,
 	usingGitHubApp,
-} from "../app/git.js";
+} from "../app/github.js";
 
 const { privateKey } = generateKeyPairSync("rsa", {
 	modulusLength: 2048,

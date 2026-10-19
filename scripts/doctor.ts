@@ -13,7 +13,7 @@ import {
 	renderWorkspaceId,
 	uiCredentials,
 } from "../app/config.js";
-import { githubToken, usingGitHubApp } from "../app/git.js";
+import { githubToken, usingGitHubApp } from "../app/github.js";
 import { RENDER_READ_ONLY_TOOLS } from "../app/policy.js";
 import { findBlueprint, renderMcpUrl } from "../app/render.js";
 import { db } from "../app/store.js";

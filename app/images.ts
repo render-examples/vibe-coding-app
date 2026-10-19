@@ -16,6 +16,8 @@ const SEARCH_TIMEOUT_MS = 20_000;
 const FETCH_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_BACKOFF_MS = 1_000;
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 3;
 /** The search results to choose from, for each subject. */
 const CANDIDATES = 8;
 
@@ -92,9 +94,9 @@ async function collectOne(
  * Pick one candidate: a real photograph, wide rather than tall, best source
  * available.
  *
- * Sorting by thumbnail area used to win, and since every thumbnail is capped
- * to the same width, that meant "tallest" — which selected portraits, the
- * largest files, and the worst shapes for a hero image.
+ * Rank by the source, not the thumbnail. Every thumbnail is capped to the
+ * same width, so the largest thumbnail is the tallest one: a portrait, the
+ * largest file, and the worst shape for a hero image.
  */
 export function bestCandidate(
 	candidates: readonly CommonsCandidate[],
@@ -115,29 +117,72 @@ export function bestCandidate(
 /**
  * Fetch and check one image, or throw with a reason to log. The URL comes
  * from Commons, but it is still data from the internet: only HTTPS, only an
- * allowed host, only an image, and only up to the size limit.
+ * allowed host, only an image, and only up to the size limit. A redirect can
+ * point anywhere, so each hop is checked as the first URL is.
  */
 async function downloadImage(rawUrl: string): Promise<Buffer> {
-	const url = new URL(rawUrl);
+	const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+	let url = allowedUrl(rawUrl);
+	for (let hop = 0; ; hop++) {
+		const response = await fetch(url, {
+			headers: { "user-agent": USER_AGENT },
+			redirect: "manual",
+			signal,
+		});
+		const location = response.headers.get("location");
+		if (!REDIRECTS.has(response.status) || !location) {
+			return imageBody(response);
+		}
+		await response.body?.cancel();
+		if (hop === MAX_REDIRECTS) throw new Error("too many redirects");
+		url = allowedUrl(location, url);
+	}
+}
+
+/** A URL that the image download may fetch, or an error. */
+function allowedUrl(raw: string, base?: URL): URL {
+	const url = new URL(raw, base);
 	if (url.protocol !== "https:") throw new Error("not https");
 	if (!factoryConfig.assets.allowedHosts.includes(url.hostname)) {
 		throw new Error(`host not allowed: ${url.hostname}`);
 	}
+	return url;
+}
 
-	const response = await fetch(url, {
-		headers: { "user-agent": USER_AGENT },
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-	});
-	if (!response.ok) throw new Error(`HTTP ${response.status}`);
+/**
+ * The body of an image response. A body over the limit is refused by its
+ * content-length before the read, and the read stops at the limit for a body
+ * that has none or that lies.
+ */
+async function imageBody(response: Response): Promise<Buffer> {
+	const limit = factoryConfig.assets.maxBytes;
+	const refuse = async (reason: string): Promise<never> => {
+		await response.body?.cancel();
+		throw new Error(reason);
+	};
+	if (!response.ok) return refuse(`HTTP ${response.status}`);
 	if (!(response.headers.get("content-type") ?? "").startsWith("image/")) {
-		throw new Error("not an image");
+		return refuse("not an image");
 	}
+	const declared = Number(response.headers.get("content-length"));
+	if (declared > limit) return refuse(`${declared} bytes exceeds the limit`);
 
-	const bytes = Buffer.from(await response.arrayBuffer());
-	if (bytes.byteLength > factoryConfig.assets.maxBytes) {
-		throw new Error(`${bytes.byteLength} bytes exceeds the limit`);
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	if (response.body) {
+		const reader = response.body.getReader();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > limit) {
+				await reader.cancel();
+				throw new Error(`the body exceeds the limit of ${limit} bytes`);
+			}
+			chunks.push(value);
+		}
 	}
-	return bytes;
+	return Buffer.concat(chunks);
 }
 
 function slugify(subject: string): string {
@@ -272,8 +317,8 @@ function parseCommons(payload: unknown): CommonsCandidate[] {
 			}[];
 		};
 		const info = record.imageinfo?.[0];
-		// Thumbnail only. Falling back to the original once shipped an archive
-		// master into a landing page.
+		// Thumbnail only. The original can be an archive master, far too large
+		// for a landing page.
 		if (!info?.thumburl || !record.title) continue;
 
 		const meta = info.extmetadata ?? {};

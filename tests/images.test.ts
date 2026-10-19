@@ -12,6 +12,7 @@ import type { Sandbox } from "../app/sandbox.js";
 
 const APP_DIR = "/home/user/repo/apps/demo/shop";
 const THUMB = "https://upload.wikimedia.org/thumb/walnut_chair.jpg";
+const COMMONS = "https://commons.wikimedia.org/";
 
 /** One search result, as the Commons API sends it. */
 function commonsPage(url = THUMB) {
@@ -55,7 +56,7 @@ describe("collectImages", () => {
 			"fetch",
 			vi.fn(async (request: string | URL | Request) => {
 				const target = String(request);
-				return target.startsWith("https://commons.wikimedia.org/")
+				return target.startsWith(COMMONS)
 					? Response.json(commonsPage(url))
 					: image(target);
 			}),
@@ -132,6 +133,102 @@ describe("collectImages", () => {
 			[],
 		);
 		expect(image).not.toHaveBeenCalled();
+	});
+
+	const redirect = (location: string) =>
+		new Response(null, { status: 302, headers: { location } });
+
+	it("follows a redirect to an allowed host", async () => {
+		const moved = "https://thumb.wikimedia.org/walnut_chair.jpg";
+		const image = vi.fn((url: string) =>
+			url === THUMB ? redirect(moved) : jpeg(),
+		);
+		serve(image);
+
+		expect(await collectImages(sandbox, APP_DIR, ["Walnut chair"])).toHaveLength(
+			1,
+		);
+		expect(image.mock.calls.map(([url]) => url)).toEqual([THUMB, moved]);
+		const downloads = vi
+			.mocked(fetch)
+			.mock.calls.filter(([url]) => !String(url).startsWith(COMMONS));
+		expect(downloads.map(([, init]) => init?.redirect)).toEqual([
+			"manual",
+			"manual",
+		]);
+	});
+
+	// An allowed host can redirect anywhere, so each hop is checked again.
+	it.each([
+		["a host that is not allowed", "https://evil.example/walnut_chair.jpg"],
+		["http", "http://upload.wikimedia.org/walnut_chair.jpg"],
+	])("does not follow a redirect to %s", async (_label, location) => {
+		const image = vi.fn((url: string) =>
+			url === THUMB ? redirect(location) : jpeg(),
+		);
+		serve(image);
+
+		expect(await collectImages(sandbox, APP_DIR, ["Walnut chair"])).toEqual(
+			[],
+		);
+		expect(image).toHaveBeenCalledOnce();
+		expect(writeFile).not.toHaveBeenCalled();
+	});
+
+	it("stops after a few redirects", async () => {
+		const image = vi.fn(() => redirect(THUMB));
+		serve(image);
+
+		expect(await collectImages(sandbox, APP_DIR, ["Walnut chair"])).toEqual(
+			[],
+		);
+		expect(image).toHaveBeenCalledTimes(4);
+		expect(console.warn).toHaveBeenCalledWith(
+			expect.stringContaining("too many redirects"),
+		);
+	});
+
+	it("refuses a body whose content-length is over the size limit", async () => {
+		serve(
+			() =>
+				new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+					headers: {
+						"content-type": "image/jpeg",
+						"content-length": String(3 * 1024 * 1024),
+					},
+				}),
+		);
+
+		expect(await collectImages(sandbox, APP_DIR, ["Walnut chair"])).toEqual(
+			[],
+		);
+		expect(console.warn).toHaveBeenCalledWith(
+			expect.stringContaining(`${3 * 1024 * 1024} bytes exceeds the limit`),
+		);
+	});
+
+	// A body with no content-length can be as large as the server likes.
+	it("stops reading a body once it is over the size limit", async () => {
+		let pulls = 0;
+		const cancel = vi.fn();
+		const endless = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls++;
+				controller.enqueue(new Uint8Array(1024 * 1024));
+			},
+			cancel,
+		});
+		serve(
+			() =>
+				new Response(endless, { headers: { "content-type": "image/jpeg" } }),
+		);
+
+		expect(await collectImages(sandbox, APP_DIR, ["Walnut chair"])).toEqual(
+			[],
+		);
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(pulls).toBeLessThanOrEqual(4);
+		expect(writeFile).not.toHaveBeenCalled();
 	});
 });
 

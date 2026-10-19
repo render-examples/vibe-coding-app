@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { appPath, factoryConfig } from "../factory.config.js";
 import { rootBlueprint } from "../app/blueprint.js";
 import type { AppSpec, Manifest, Service } from "../app/contracts.js";
-import type { AppFile } from "../app/git.js";
+import type { AppFile } from "../app/files.js";
 import type { DeployOutcome } from "../app/render.js";
 import type { ExecResult, Sandbox } from "../app/sandbox.js";
 import type { AppClaim } from "../app/store.js";
@@ -19,8 +19,8 @@ import {
 	removeFromBlueprintTask,
 	waitForSyncsTask,
 } from "../app/delete.js";
-import { awaitDeployment } from "../app/deploy.js";
-import { publishAppTask } from "../app/publish.js";
+import { awaitDeployment, type DeployContext } from "../app/deploy.js";
+import { publishAppTask, servicesChangedBy } from "../app/publish.js";
 import { checkStaticSiteEnvVars, verifyAppTask } from "../app/verify.js";
 import { deleteApp, promptToApp, removeApp } from "../app/workflow.js";
 
@@ -38,6 +38,7 @@ const mocks = vi.hoisted(() => ({
 	connectSandbox: vi.fn(),
 	fetchDeployLogs: vi.fn(),
 	findBlueprint: vi.fn(),
+	latestDeploys: vi.fn(async () => new Map<string, string>()),
 	pageContains: vi.fn(),
 	waitForServices: vi.fn(),
 	waitForDeploy: vi.fn(),
@@ -99,16 +100,24 @@ vi.mock("../app/store.js", () => ({
 	touchRun: vi.fn(async () => {}),
 }));
 
-// Commit and push go to GitHub. The copy of the files of an app is a fake
-// that moves files between two fake sandboxes: tests/git.test.ts runs the
-// real one with git and tar. The verification commands stay real and go to
-// the fake sandbox.
+// Commit and push go to GitHub, and so does the token. The copy of the files
+// of an app is a fake that moves files between two fake sandboxes:
+// tests/git.test.ts and tests/files.test.ts run the real one with git and
+// tar. The verification commands stay real and go to the fake sandbox.
 vi.mock("../app/git.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../app/git.js")>()),
 	commitPaths: mocks.commitPaths,
 	pushVerified: mocks.pushVerified,
-	githubToken: mocks.githubToken,
 	cloneAppsRepo: mocks.cloneAppsRepo,
+}));
+
+vi.mock("../app/github.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../app/github.js")>()),
+	githubToken: mocks.githubToken,
+}));
+
+vi.mock("../app/files.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../app/files.js")>()),
 	readAppFiles: mocks.readAppFiles,
 	writeAppFiles: mocks.writeAppFiles,
 }));
@@ -129,6 +138,7 @@ vi.mock("../app/render.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../app/render.js")>()),
 	fetchDeployLogs: mocks.fetchDeployLogs,
 	findBlueprint: mocks.findBlueprint,
+	latestDeploys: mocks.latestDeploys,
 	pageContains: mocks.pageContains,
 	waitForServices: mocks.waitForServices,
 	waitForDeploy: mocks.waitForDeploy,
@@ -349,6 +359,15 @@ function fakeSandbox(files: Map<string, string>, id = "sbx-clone") {
 		if (command.startsWith("ls -A ")) {
 			return { output: "api\nweb\n", exitCode: 0 };
 		}
+		// As for a first commit: the commit changes every file of the clone.
+		if (command.includes(" diff-tree ")) {
+			const paths = [...files.keys()].flatMap((path) =>
+				path.startsWith(`${factoryConfig.repoDir}/`)
+					? [`${path.slice(factoryConfig.repoDir.length + 1)}\0`]
+					: [],
+			);
+			return { output: paths.join(""), exitCode: 0 };
+		}
 		return { output: "", exitCode: 0 };
 	});
 
@@ -427,7 +446,17 @@ function newBuild(entries: [string, string][] = []): void {
 	build = fakeSandbox(buildFiles, "sbx-build");
 }
 
-function deploy(context = tasks) {
+/**
+ * The deploy of the first push of the shop app. By default its services did
+ * not exist before the push.
+ */
+function deploy(
+	context = tasks,
+	push: Pick<DeployContext, "deploysBefore" | "changedServices"> = {
+		deploysBefore: new Map(),
+		changedServices: ["web", "api"],
+	},
+) {
 	return awaitDeployment({
 		tasks: context,
 		sandbox: build.sandbox,
@@ -438,7 +467,80 @@ function deploy(context = tasks) {
 		runId: "run-1",
 		summary: "Handmade walnut furniture, sold online.",
 		databaseUrl: null,
+		...push,
 	});
+}
+
+const WEB_ID = "srv-acme-demo-shop-web";
+const API_ID = "srv-acme-demo-shop-api";
+
+/**
+ * The tests of a describe block use the real waitForDeploy(), and fakeRender()
+ * gives the result of each poll of the deploys of a service.
+ */
+function useRealDeployWaits(): void {
+	beforeEach(async () => {
+		const render =
+			await vi.importActual<typeof import("../app/render.js")>(
+				"../app/render.js",
+			);
+		mocks.waitForDeploy.mockImplementation(render.waitForDeploy);
+		vi.useFakeTimers();
+		vi.stubEnv("RENDER_API_KEY", "rnd_test");
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+		vi.mocked(console.warn).mockRestore();
+	});
+}
+
+/**
+ * Each poll of the deploys of a service gets the next deploy in its script,
+ * or the next error status. After the last one, each poll gets the last one
+ * again. Returns the number of polls of each service.
+ */
+function fakeRender(
+	scripts: Record<string, ({ id: string; status: string } | number)[]>,
+): Map<string, number> {
+	const polls = new Map<string, number>();
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string | URL | Request) => {
+			const path = new URL(String(url)).pathname;
+			const serviceId = path.match(/^\/v1\/services\/([^/]+)\/deploys$/)?.[1];
+			const script = serviceId ? scripts[serviceId] : undefined;
+			if (!serviceId || !script) {
+				throw new Error(`Unexpected request to ${url}`);
+			}
+			const poll = polls.get(serviceId) ?? 0;
+			polls.set(serviceId, poll + 1);
+			const result = script[Math.min(poll, script.length - 1)];
+			return typeof result === "number"
+				? new Response("", { status: result })
+				: Response.json([{ deploy: result, cursor: "c" }]);
+		}),
+	);
+	return polls;
+}
+
+/** Deploy, and run the sleeps between the polls at once. */
+async function deployOn(push?: Parameters<typeof deploy>[1]) {
+	const [result] = await Promise.all([
+		deploy(tasks, push),
+		vi.runAllTimersAsync(),
+	]);
+	return result;
+}
+
+/** The deploy status that the deploy manager got in each round. */
+function diagnosedStatuses(): string[] {
+	return mocks.deployManagerTask.mock.calls.map(
+		([, input]) => input.message.match(/deploy status "([^"]+)"/)?.[1],
+	);
 }
 
 /**
@@ -493,7 +595,6 @@ describe("awaitDeployment repairs", () => {
 		);
 		mocks.fetchDeployLogs.mockResolvedValue("");
 		mocks.deployManagerTask.mockResolvedValue({
-			allHealthy: false,
 			failures: [
 				{
 					serviceName: "acme-demo-shop-api",
@@ -545,6 +646,8 @@ describe("awaitDeployment repairs", () => {
 				user: "demo",
 				appName: "shop",
 				commit: "b".repeat(40),
+				// The fake API directory holds no file.
+				changedServices: ["web"],
 			},
 		]);
 	});
@@ -721,70 +824,10 @@ describe("awaitDeployment repairs", () => {
 	 * result of each poll of the deploys of a service.
 	 */
 	describe("after a repair push", () => {
-		const WEB_ID = "srv-acme-demo-shop-web";
-		const API_ID = "srv-acme-demo-shop-api";
 		const LIVE_WEB = { id: "dep-web1", status: "live" };
 		const FAILED_API = { id: "dep-api1", status: "pre_deploy_failed" };
 
-		beforeEach(async () => {
-			const render =
-				await vi.importActual<typeof import("../app/render.js")>(
-					"../app/render.js",
-				);
-			mocks.waitForDeploy.mockImplementation(render.waitForDeploy);
-			vi.useFakeTimers();
-			vi.stubEnv("RENDER_API_KEY", "rnd_test");
-			vi.spyOn(console, "warn").mockImplementation(() => {});
-		});
-
-		afterEach(() => {
-			vi.useRealTimers();
-			vi.unstubAllGlobals();
-			vi.unstubAllEnvs();
-			vi.mocked(console.warn).mockRestore();
-		});
-
-		/**
-		 * Each poll of the deploys of a service gets the next deploy in its
-		 * script, or the next error status. After the last one, each poll gets
-		 * the last one again. Returns the number of polls of each service.
-		 */
-		function fakeRender(
-			scripts: Record<string, ({ id: string; status: string } | number)[]>,
-		): Map<string, number> {
-			const polls = new Map<string, number>();
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (url: string | URL | Request) => {
-					const path = new URL(String(url)).pathname;
-					const serviceId = path.match(/^\/v1\/services\/([^/]+)\/deploys$/)?.[1];
-					const script = serviceId ? scripts[serviceId] : undefined;
-					if (!serviceId || !script) {
-						throw new Error(`Unexpected request to ${url}`);
-					}
-					const poll = polls.get(serviceId) ?? 0;
-					polls.set(serviceId, poll + 1);
-					const result = script[Math.min(poll, script.length - 1)];
-					return typeof result === "number"
-						? new Response("", { status: result })
-						: Response.json([{ deploy: result, cursor: "c" }]);
-				}),
-			);
-			return polls;
-		}
-
-		/** Deploy, and run the sleeps between the polls at once. */
-		async function deployOn() {
-			const [result] = await Promise.all([deploy(), vi.runAllTimersAsync()]);
-			return result;
-		}
-
-		/** The deploy status that the deploy manager got in each round. */
-		function diagnosedStatuses(): string[] {
-			return mocks.deployManagerTask.mock.calls.map(
-				([, input]) => input.message.match(/deploy status "([^"]+)"/)?.[1],
-			);
-		}
+		useRealDeployWaits();
 
 		it("waits past the failed deploy that is still the newest", async () => {
 			builderReturns(repair);
@@ -905,6 +948,196 @@ describe("awaitDeployment repairs", () => {
 			expect(mocks.pushVerified).not.toHaveBeenCalled();
 			expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
 		});
+	});
+
+	// Render said that the deploy failed. A diagnosis of nothing once sent the
+	// run to the smoke checks, which passed against the last live deploy.
+	it("fails when the deploy manager diagnoses no failure", async () => {
+		mocks.deployManagerTask.mockResolvedValue({ failures: [] });
+
+		const result = await deploy();
+
+		expect(result).toEqual({
+			status: "deploy_failed",
+			summary:
+				"The deploy manager diagnosed no failure to repair in round 1. " +
+				'acme-demo-shop-api ended as "pre_deploy_failed".',
+		});
+		expect(mocks.buildTask).not.toHaveBeenCalled();
+		expect(mocks.pushVerified).not.toHaveBeenCalled();
+		expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
+	});
+
+	/**
+	 * A rerun of the same app name replaces the app, and its services exist.
+	 * Right after the push, the newest deploy of each one is still the deploy
+	 * of the old app. The first round once took that deploy as the result of
+	 * the push, and smoke-tested the old code.
+	 */
+	describe("after the push of a rerun", () => {
+		const OLD_WEB = { id: "dep-web0", status: "live" };
+		const OLD_API = { id: "dep-api0", status: "live" };
+		const rerun = (changedServices: string[]) => ({
+			deploysBefore: new Map([
+				["acme-demo-shop-web", OLD_WEB.id],
+				["acme-demo-shop-api", OLD_API.id],
+			]),
+			changedServices,
+		});
+
+		useRealDeployWaits();
+
+		it("waits past the deploys of the old app", async () => {
+			const polls = fakeRender({
+				[WEB_ID]: [
+					OLD_WEB,
+					OLD_WEB,
+					{ id: "dep-web1", status: "build_in_progress" },
+					{ id: "dep-web1", status: "live" },
+				],
+				[API_ID]: [OLD_API, { id: "dep-api1", status: "live" }],
+			});
+
+			const result = await deployOn(rerun(["web", "api"]));
+
+			expect(result.status, result.summary).toBe("deployed");
+			expect(polls.get(WEB_ID)).toBe(4);
+			expect(polls.get(API_ID)).toBe(2);
+			expect(mocks.deployManagerTask).not.toHaveBeenCalled();
+		});
+
+		it("repairs a failed deploy of the new app while the old one is live", async () => {
+			builderReturns(repair);
+			fakeRender({
+				[WEB_ID]: [OLD_WEB, { id: "dep-web1", status: "live" }],
+				[API_ID]: [
+					OLD_API,
+					{ id: "dep-api1", status: "pre_deploy_failed" },
+					// The first poll after the repair push.
+					{ id: "dep-api1", status: "pre_deploy_failed" },
+					{ id: "dep-api2", status: "live" },
+				],
+			});
+
+			const result = await deployOn(rerun(["web", "api"]));
+
+			expect(result.status, result.summary).toBe("deployed");
+			expect(diagnosedStatuses()).toEqual(["pre_deploy_failed"]);
+			expect(mocks.fetchDeployLogs).toHaveBeenCalledWith(
+				API_ID,
+				"dep-api1",
+				"tea-test",
+			);
+		});
+
+		// The buildFilter of a service is its directory, so Render does not
+		// deploy a service whose files the push did not change.
+		it("takes the live deploy of a service that the push did not change", async () => {
+			const polls = fakeRender({
+				[WEB_ID]: [OLD_WEB],
+				[API_ID]: [OLD_API, { id: "dep-api1", status: "live" }],
+			});
+
+			const result = await deployOn(rerun(["api"]));
+
+			expect(result.status, result.summary).toBe("deployed");
+			expect(polls.get(WEB_ID)).toBe(1);
+			expect(polls.get(API_ID)).toBe(2);
+		});
+
+		it("waits for the first deploy of a service that the old app did not have", async () => {
+			const polls = fakeRender({
+				[WEB_ID]: [OLD_WEB, { id: "dep-web1", status: "live" }],
+				[API_ID]: [{ id: "dep-api1", status: "live" }],
+			});
+
+			const result = await deployOn({
+				deploysBefore: new Map([["acme-demo-shop-web", OLD_WEB.id]]),
+				changedServices: ["web", "api"],
+			});
+
+			expect(result.status, result.summary).toBe("deployed");
+			expect(polls.get(API_ID)).toBe(1);
+		});
+
+		it("fails a changed service whose new deploy never starts", async () => {
+			fakeRender({
+				[WEB_ID]: [OLD_WEB],
+				[API_ID]: [OLD_API],
+			});
+
+			const result = await deployOn(rerun(["api"]));
+
+			expect(result).toEqual({
+				status: "deploy_failed",
+				summary:
+					"acme-demo-shop-api: the push did not start a new deploy in 15 minutes. " +
+					'The newest deploy is still dep-api0 ("live"). ' +
+					"Render deploys a service again when a commit changes files in its rootDir or its entry in the Blueprint.",
+			});
+			expect(mocks.deployManagerTask).not.toHaveBeenCalled();
+			expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
+		});
+	});
+});
+
+/**
+ * Render's buildFilter of each service is `<serviceDir>/**`, so only a service
+ * whose directory holds a changed path gets a new deploy.
+ */
+describe("servicesChangedBy", () => {
+	const withRootDirs = (web: string, api: string): AppSpec => ({
+		...spec,
+		manifest: {
+			...manifest,
+			services: [
+				{ ...manifest.services[0], rootDir: web },
+				{ ...manifest.services[1], rootDir: api },
+			],
+		},
+	});
+
+	it("names each service with a changed path in its directory", () => {
+		expect(
+			servicesChangedBy(withRootDirs("web", "api"), [
+				"apps/demo/shop/api/server.js",
+				"apps/demo/shop/factory.json",
+				"render.yaml",
+			]),
+		).toEqual(["api"]);
+	});
+
+	it("does not take a directory that only starts with the name of the service", () => {
+		expect(
+			servicesChangedBy(withRootDirs("web", "api"), [
+				"apps/demo/shop/website/index.html",
+				"apps/demo/shop/api.md",
+			]),
+		).toEqual([]);
+	});
+
+	// "." is the app directory, so factory.json, which each publish rewrites,
+	// is in it.
+	it("reads a rootDir of the app directory itself", () => {
+		expect(
+			servicesChangedBy(withRootDirs(".", "./api/"), [
+				"apps/demo/shop/factory.json",
+			]),
+		).toEqual(["web"]);
+		expect(
+			servicesChangedBy(withRootDirs(".", "./api/"), [
+				"apps/demo/shop/api/server.js",
+			]),
+		).toEqual(["web", "api"]);
+	});
+
+	it("names no service for a change of a different app", () => {
+		expect(
+			servicesChangedBy(withRootDirs(".", "api"), [
+				"apps/demo/shopfront/index.html",
+				"apps/victim/site/index.html",
+			]),
+		).toEqual([]);
 	});
 });
 
@@ -1650,6 +1883,7 @@ describe("promptToApp", () => {
 					user: "demo",
 					appName: "shop",
 					commit: "c".repeat(40),
+					changedServices: ["web"],
 				},
 			]);
 		});
@@ -1833,6 +2067,50 @@ describe("promptToApp", () => {
 			expect(mocks.createSandbox).toHaveBeenCalledTimes(1);
 			expect(mocks.githubToken).not.toHaveBeenCalled();
 			expect(mocks.pushVerified).not.toHaveBeenCalled();
+		});
+
+		// A rerun replaces the app, and its storefront exists. Right after the
+		// push, the newest deploy of the storefront is still that of the old app.
+		it("waits for a deploy newer than the deploy from before the push", async () => {
+			const web = `${factoryConfig.resourcePrefix}-demo-shop-web`;
+			mocks.latestDeploys.mockResolvedValueOnce(new Map([[web, "dep-old"]]));
+			mocks.findBlueprint.mockResolvedValue({
+				id: "exs-test",
+				name: "factory",
+				status: "synced",
+				autoSync: true,
+				repo: "https://github.com/acme/apps",
+				branch: "main",
+				path: "render.yaml",
+			});
+			mocks.waitForServices.mockImplementation(
+				async (_workspaceId: string, names: string[]) =>
+					new Map(
+						names.map((name) => [
+							name,
+							{ id: `srv-${name}`, name, url: `https://${name}.onrender.com` },
+						]),
+					),
+			);
+			mocks.waitForDeploy.mockResolvedValue(LIVE);
+			mocks.waitForHttpOk.mockResolvedValue({
+				ok: true,
+				status: 200,
+				body: STOREFRONT_HTML,
+				headers: new Headers(),
+			});
+
+			const result = await promptToApp.func(tasks, INPUT);
+
+			expect(result.status, result.summary).toBe("deployed");
+			expect(mocks.latestDeploys).toHaveBeenCalledWith("tea-test", [web]);
+			expect(mocks.latestDeploys.mock.invocationCallOrder[0]).toBeLessThan(
+				mocks.pushVerified.mock.invocationCallOrder[0],
+			);
+			expect(mocks.waitForDeploy).toHaveBeenCalledWith(
+				`srv-${web}`,
+				expect.objectContaining({ after: "dep-old" }),
+			);
 		});
 
 		it("ends the run as build_failed when the publish changes no files", async () => {

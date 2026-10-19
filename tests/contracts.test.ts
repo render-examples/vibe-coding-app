@@ -5,6 +5,7 @@ import {
 	buildOutputSchema,
 	createAppRequestSchema,
 	deleteAppInputSchema,
+	deployDiagnosisSchema,
 	deployPlanSchema,
 	manifestSchema,
 	workflowInputSchema,
@@ -302,5 +303,24 @@ describe("buildOutputSchema", () => {
 				manifest: validManifest,
 			}).success,
 		).toBe(false);
+	});
+});
+
+/**
+ * The deploy manager runs only after Render reported a failed deploy. An
+ * "allHealthy" answer once sent such a run to the smoke checks, which can
+ * pass against the last live deploy.
+ */
+describe("deployDiagnosisSchema", () => {
+	it("gives no field that declares the services healthy", () => {
+		expect(
+			deployDiagnosisSchema.parse({ allHealthy: true, failures: [] }),
+		).toEqual({ failures: [] });
+	});
+
+	it("requires the list of failures", () => {
+		expect(deployDiagnosisSchema.safeParse({ allHealthy: true }).success).toBe(
+			false,
+		);
 	});
 });

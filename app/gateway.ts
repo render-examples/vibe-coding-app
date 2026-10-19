@@ -103,7 +103,6 @@ export function createGateway(): Hono {
 	// script from an earlier deploy looks up elements the new page lacks.
 	const uiFile = (path: string) =>
 		[uiAuth, noCache, serveStatic({ path: `./public/${path}` })] as const;
-	// Two views of the same UI. Each one has a button that opens the other.
 	app.get("/", ...uiFile("index.html"));
 	app.get("/table", ...uiFile("table.html"));
 	app.get("/app.js", ...uiFile("app.js"));
