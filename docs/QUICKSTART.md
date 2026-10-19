@@ -12,7 +12,10 @@ code first, read the [Walkthrough](WALKTHROUGH.md).
 [5. Deploy the factory to Render](#5-deploy-the-factory-to-render) ·
 [6. Check the wiring](#6-check-the-wiring) ·
 [7. Clean up](#7-clean-up) ·
-[8. Extend and customize](#8-extend-and-customize)
+[8. Extend and customize](#8-extend-and-customize) ·
+[Configuration reference](#configuration-reference) ·
+[Operations](#operations) ·
+[Current limitations](#current-limitations)
 
 > **Cost warning.** Local development changes only where the orchestration
 > code runs. Every run, local or deployed, uses model tokens, creates a real
@@ -143,6 +146,9 @@ do it once, not per app.
    `factory.config.ts`).
 4. Keep **Auto Sync** on. Without it, a push does not deploy.
 
+If you change `branch` or `blueprintPath` in `factory.config.ts`, configure
+the apps Blueprint with the same values.
+
 Creating the Blueprint syncs the `render.yaml` that your first run committed,
 so Render creates that app's resources. Submit a new idea to see a complete
 run: it now waits for Render, smoke-tests the live URLs, and ends as
@@ -179,10 +185,10 @@ create the Blueprint. If you use the Deploy to Render button, change the
 1. Click **Deploy to Render** in the [README](../README.md), or choose
    **New > Blueprint** in the Dashboard and pick this repository (or your fork).
 2. Fill in the variables the Dashboard prompts for. They are the same values as
-   your `.env`; the [configuration table](README.md#configuration) lists which
-   service needs which. For GitHub, set the three `GITHUB_APP_*` variables or
-   `GITHUB_TOKEN`. The Blueprint generates `FACTORY_API_KEY`, sets
-   `DATABASE_URL` on both services, and points the gateway's
+   your `.env`; the [configuration reference](#configuration-reference) lists
+   which service needs which. For GitHub, set the three `GITHUB_APP_*`
+   variables or `GITHUB_TOKEN`. The Blueprint generates `FACTORY_API_KEY`,
+   sets `DATABASE_URL` on both services, and points the gateway's
    `RENDER_WORKFLOW_SLUG` at the workflow service.
 3. If you have not done it yet, [connect the apps Blueprint](#4-connect-the-apps-blueprint-once)
    in the workspace named by `RENDER_WORKSPACE_ID`.
@@ -233,11 +239,17 @@ and checks, without changing anything:
 Each failure tells you how to fix it. Run it against your deployed services'
 values before a demo.
 
+### Before a live demo
+
+Run `npm run doctor`, rehearse the prompt once, and delete that rehearsal app.
+Keep a deployed fallback from a different prompt, sign in to the UI before
+presenting, and confirm no other run is using one of the three concurrency
+slots. After the event, delete every generated app you no longer need.
+
 ## 7. Clean up
 
-**Generated apps keep running until you delete them.** An app with an API
-and a database leaves a web service and a Postgres instance on paid plans.
-Delete each app when you are done:
+Delete each generated app when you are done; apps with an API and database
+leave paid resources running:
 
 - in the UI, select one of its runs and click **Delete app**, or
 - `curl -X DELETE -H "Authorization: Bearer $FACTORY_API_KEY" "$GATEWAY_URL/v1/apps/$RUN_ID"`
@@ -245,7 +257,28 @@ Delete each app when you are done:
 A delete takes the app out of the Blueprint, deletes its Render services,
 database, and project, and removes its folder from the apps repository. It
 takes a few minutes. Details and failure handling are in
-[Delete an app](README.md#delete-an-app).
+[Delete failures](#delete-failures).
+
+### Delete failures
+
+A delete affects the app and all of its runs. The gateway refuses it with
+`409` while any run of that app is active. During deletion, `progress` names
+the current step; after success, `GET /v1/apps/:runId` returns `404`. Deleted
+files remain in the apps repository's Git history.
+
+If deletion ends as `delete_failed`, fix the cause and send the same request
+again. Each step continues from the state left by the previous attempt. Two
+failures require operator action:
+
+- If an apps Blueprint sync did not finish within 6 minutes, let it finish or
+  repair it in the Dashboard. Search the task logs for
+  `blueprint_syncs_unfinished`.
+- If the app's project contains a resource the factory did not create, delete
+  or move it in the Dashboard. The `render_resource_kept` event identifies the
+  resource.
+
+The [delete flow](WALKTHROUGH.md#the-delete-flow) explains the four tasks and
+why they run in that order.
 
 To remove the factory itself, delete the `vibe-factory` project in the
 Dashboard after you have deleted the generated apps. Deleting the factory
@@ -314,7 +347,7 @@ in `app/workflow.ts` when to use it (today the choice is "the plan has a
 `templates` job in `.github/workflows/ci.yml`. See
 [AGENTS.md: Change a template](../AGENTS.md#change-a-template).
 
-### Adaptation seams
+### Where to extend the factory
 
 - **Primitives:** extend the manifest, the Blueprint generator, verification,
   and teardown together, as above.
@@ -333,3 +366,114 @@ in `app/workflow.ts` when to use it (today the choice is "the plan has a
 Before you change trust boundaries, read the
 [invariants in AGENTS.md](../AGENTS.md#invariants). They are the canonical list
 of safety rules.
+
+## Configuration reference
+
+This section lists environment variables. [`.env.example`](../.env.example)
+contains the same variables with comments.
+
+| Variable | Read by | Purpose |
+| --- | --- | --- |
+| `APPS_REPO` | Workflows | The repository generated apps are committed to, as `owner/repo`. The factory Blueprint also collects the same value on the gateway service for consistent Dashboard configuration, although the gateway process does not read it. |
+| `DATABASE_URL` | Both | Postgres connection string for the `runs` table |
+| `RENDER_API_KEY` | Both | The gateway starts tasks with it. The workflows host uses it for Sandboxes, read-only platform inspection, deploy and Blueprint reads, logs, and resource deletion. |
+| `FACTORY_API_KEY` | Gateway | Bearer token for `/v1/*`, at least 24 characters. The Blueprint generates it. |
+| `UI_USERNAME` | Gateway | UI login and namespace for apps submitted in the UI; a lowercase slug |
+| `UI_PASSWORD` | Gateway | UI password, at least 16 characters |
+| `UI_AUTH_DISABLED` | Gateway | `true` skips Basic Auth for local preview; ignored when `NODE_ENV=production` |
+| `RENDER_WORKFLOW_SLUG` | Gateway | Workflow service slug, without a task name. The Blueprint sets it. |
+| `PORT` | Gateway | HTTP port; defaults to `3000` |
+| `RENDER_WORKSPACE_ID` | Workflows | Workspace (`tea-...`) for Sandboxes, services, and the apps Blueprint |
+| `ANTHROPIC_API_KEY` | Workflows | Claude Agent SDK credential |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | Workflows | Preferred GitHub App credentials. The private key may be PEM, PEM with escaped newlines, or base64. |
+| `GITHUB_TOKEN` | Workflows | Fine-grained personal access token, used when no GitHub App is configured |
+| `RENDER_MCP_URL` | Workflows | Optional Render MCP endpoint; defaults to `https://mcp.render.com/mcp` |
+| `GITHUB_API_URL` | Workflows | Optional GitHub API base URL; defaults to `https://api.github.com` |
+| `FACTORY_GATEWAY_URL`, `FACTORY_USER` | `npm run demo` | Gateway to call and namespace for script-submitted apps |
+
+`npm run dev:gateway` sets `RENDER_USE_LOCAL_DEV=true` for the gateway so it
+uses the local workflow task server. Do not put this variable in `.env`: the
+workflows host reads that file too and must use the real Render API.
+
+The remaining settings live in `factory.config.ts`; see
+[Change the knobs](#change-the-knobs-in-factoryconfigts).
+
+## Operations
+
+The [HTTP API and run statuses](WALKTHROUGH.md#http-api-and-run-statuses)
+section defines the status payload. For a stuck run, start with
+`GET /v1/apps/:runId` and the service's task runs in the Render Dashboard.
+
+### Long-running stages
+
+- **`verifying`:** `verify-app` builds, boots, and queries the app in a
+  Sandbox. A build command that never exits hits the 30-minute deadline and
+  the run ends as `failed`.
+- **`waiting_for_services`:** Blueprint sync has not created every expected
+  service. The run ends as `deploy_failed` after 6 minutes; Auto Sync being
+  off is the usual cause.
+- **`waiting_for_deploys`:** the workflow is waiting for a deploy newer than
+  the push it just made. If no new deploy starts within 15 minutes, the run
+  ends as `deploy_failed`.
+- **`smoke_testing`:** the workflow checks the public URLs, storefront API
+  hostname, data, and CORS. New hostnames can return 404 for several minutes;
+  site and API-health checks wait up to 10 minutes and the data check up to
+  3 minutes.
+
+Every wait updates `progress`. Render API reads retry after 5 seconds and fail
+after five consecutive errors; a 401 or 403 fails immediately. When a task
+crashes, times out, or is canceled before recording a result, the next status
+read reconciles the task run and frees its concurrency slot.
+
+### Log events
+
+Workflow code writes one JSON line per notable event. Search task logs for the
+`event` field:
+
+| Task | Events |
+| --- | --- |
+| `prompt-to-app` | `image_skipped`, `model_json_repair`, `render_read_failed`, `deploy_logs_unavailable` |
+| Agents | `agent_completed`, with model and token counts |
+| `verify-app` | `app_verified`; `app_verification_failed` |
+| `publish-app` | `app_published`; `skipped_app_spec` |
+| `remove-app-from-blueprint` | `app_removed_from_blueprint`; `app_spec_not_found` |
+| `wait-for-blueprint-syncs` | `push_event_wait`; `blueprint_syncs_unfinished`; `blueprint_syncs_finished`; `blueprint_not_found`; `render_read_failed` |
+| `delete-app-resources` | `render_resource_deleted`; `render_resource_kept`; `render_project_not_empty`; `render_project_deleted`; `render_project_not_found` |
+| `remove-app-files` | `app_files_removed` |
+| `delete-app` | `app_deleted`; `app_delete_failed` |
+
+## Current limitations
+
+- **Every run costs money, including local development.** It uses model
+  tokens and a Render Sandbox, then deploys services.
+- **Generated apps run until you delete them.** APIs and databases use paid
+  plans because free web services spin down and a workspace gets only one free
+  Postgres.
+- **Connecting the apps Blueprint is manual once.** Render has no API for
+  creating a Blueprint.
+- **One factory can run in a workspace.** Render rejects another Blueprint
+  that defines `vibe-factory-workflows`.
+- **Each deployment uses one apps repository and branch.** Concurrent pushes
+  that lose the race retry on the new branch tip.
+- **Authentication is for a trusted demo.** One Basic Auth user, one bearer
+  token, and user slugs do not provide tenant isolation, authorization,
+  quotas, or abuse controls.
+- **Deletion is per app, not per run.** An app's runs share files and
+  resources, and deleted files remain in Git history.
+- **Sandbox Postgres has no extensions.** It is a fresh Postgres 18; an app
+  requiring an extension must install it during verification.
+- **Failed runs do not resume from a step.** `prompt-to-app` is not retried;
+  submit the prompt again. Render reads have their own bounded retries.
+- **There is no model reviewer.** Deterministic checks and live smoke tests
+  decide whether an app passes.
+
+### Cost guide
+
+These October 2026 estimates are for planning only; verify
+[Render pricing](https://render.com/pricing) and
+[Anthropic pricing](https://www.anthropic.com/pricing) before quoting them.
+
+- Model usage is roughly $1–$5 per run with the default agents.
+- The gateway and factory Postgres are roughly $7 per month each.
+- A generated app with an API and database is roughly $14 per month until
+  deleted; a static-only app uses a free static site.

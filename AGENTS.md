@@ -3,7 +3,8 @@
 This file applies to the entire repository. It holds the conventions, the
 invariants (the canonical list of safety boundaries), and the checklists for
 changing the code. For setup, read [docs/QUICKSTART.md](docs/QUICKSTART.md).
-For a guided tour of the code, read [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
+To follow one run through the code, read
+[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
 
 ## What this is
 
@@ -78,7 +79,8 @@ The gateway listens on `0.0.0.0:${PORT:-3000}`. `GET /health` is liveness,
 `GET /ready` checks Postgres and is the Render health check, prompts arrive at
 `POST /v1/apps`, runs are read at `GET /v1/apps/:runId`, and
 `DELETE /v1/apps/:runId` deletes the run's app with all of its runs. The full
-reference is in [docs/README.md](docs/README.md#http-api).
+reference is in
+[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md#http-api-and-run-statuses).
 
 The browser UI at `/` and `/table` is protected by HTTP Basic Auth
 (`UI_USERNAME`, `UI_PASSWORD`) and submits through `/ui/apps`, which keeps
@@ -158,7 +160,7 @@ app/
   sandbox.ts     Render Sandboxes, shellEscape, Postgres in the sandbox
   blueprint.ts   render.yaml generation: the only path that creates resources
   render.ts      REST reads of services, deploys, logs, and Blueprints; HTTP probes
-  teardown.ts    The deletes of a deleted app: the only Render write API calls
+  teardown.ts    Deletes an app's resources: the only Render write API calls
   git.ts         Clone, commit, push and verify, .gitignore generation,
                  initAppDir(), removeIgnored()
   files.ts       readAppFiles(), appFiles(), writeAppFiles(), MAX_APP_BYTES:
@@ -635,9 +637,9 @@ a step.
 5. Sandbox cleanup and repeated side effects are safe.
 6. If configuration changed, `.env.example`, `render.yaml`,
    `scripts/doctor.ts`, `README.md`, `docs/QUICKSTART.md`, and the
-   configuration table in `docs/README.md` are updated.
+   configuration reference in `docs/QUICKSTART.md` are updated.
 7. If behavior that the docs describe changed, `docs/WALKTHROUGH.md`,
-   `docs/TAKEAWAYS.md`, and `docs/FAQ.md` are updated, and this file's
+   `docs/TAKEAWAYS.md`, and `docs/QUICKSTART.md` are updated, and this file's
    invariants still match the code.
 8. Browser UI changes preserve Basic Auth and never serialize secrets.
 9. `npm run check` passes.

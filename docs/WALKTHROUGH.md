@@ -1,16 +1,15 @@
 # Walkthrough
 
-This is a guided tour of the code. It starts with the two processes and the
-repository layout, then follows one run from the HTTP request to a live app,
-naming the file and function at each step. After that it covers the main
-types, the trust boundaries, the delete flow, how state is kept, and how the
-tests are organized.
+Follow one run through the codebase, file by file. Start with the two
+processes and HTTP interface, then trace a request to a live app. The later
+sections cover the main types, trust boundaries, deletion, state, and tests.
 
 Keep the code open beside this page. Everything that matters is under `app/`,
 one concern per file, and `app/workflow.ts` reads as the table of contents.
 
 **Contents:**
 [Two processes](#two-processes) ·
+[HTTP API and run statuses](#http-api-and-run-statuses) ·
 [Repository layout](#repository-layout) ·
 [One run, end to end](#one-run-end-to-end) ·
 [Key interfaces](#key-interfaces-and-types) ·
@@ -57,6 +56,45 @@ must register in the same synchronous pass. The host does this with a single
 task defined in a second import, or a top-level `await` in a task module, can
 miss registration. `tests/host.test.ts` checks this in a real Node process.
 
+## HTTP API and run statuses
+
+The gateway exposes health checks, a bearer-authenticated API, and
+Basic-Auth browser routes:
+
+| Route | Auth | What it does |
+| --- | --- | --- |
+| `GET /health` | None | Liveness |
+| `GET /ready` | None | Checks Postgres; the Render health check |
+| `POST /v1/apps` | Bearer | Starts a run |
+| `GET /v1/apps/:runId` | Bearer | Reads a run |
+| `DELETE /v1/apps/:runId` | Bearer | Deletes the run's app and all of its runs |
+| `GET`, `POST /ui/apps`; `GET`, `DELETE /ui/apps/:runId` | Basic | Browser equivalents scoped to `UI_USERNAME` |
+| `GET /`, `GET /table` | Basic | The two browser views |
+
+`POST /v1/apps` accepts `prompt` (8–2,000 characters), optional `user`
+(a lowercase slug, default `demo`), and optional `idempotencyKey`. Reusing a
+key returns the original run with `duplicate: true`. A new run returns `202`
+with `runId` and `statusUrl`; the gateway returns `429` at the concurrency
+cap, `413` above 64 KB, `400` for invalid input, and `502` when task dispatch
+fails.
+
+`GET /v1/apps/:runId` returns `status`, `stage`, `progress`, `stageHistory`,
+`appName`, `urls`, `blueprintPath`, `summary`, timestamps, and Dashboard
+links. Secret-shaped strings are redacted from summaries and progress.
+
+| Status | Meaning |
+| --- | --- |
+| `running` | `prompt-to-app` is working; `stage` and `progress` say where |
+| `deployed` | The app is live and passed smoke checks |
+| `awaiting_blueprint` | The app is committed, but no Blueprint watches the apps repository |
+| `build_failed` | Verification still failed after the builder's repair rounds |
+| `deploy_failed` | Render could not deploy the app, or a live smoke check failed |
+| `failed` | The run stopped for another reason; `summary` says why |
+| `deleting`, `delete_failed` | Deletion is in progress or failed |
+
+The Quickstart's [Operations](QUICKSTART.md#operations) section explains
+long-running stages, log events, and operator recovery.
+
 ## Repository layout
 
 ```text
@@ -94,8 +132,9 @@ file and the allowed import directions.
 
 ### 1. The request reaches the gateway
 
-A run starts at `POST /v1/apps` (bearer token) or `POST /ui/apps` (Basic Auth).
-Both call `createRun()` in `app/gateway.ts`. Before the handler runs, Hono's
+A run starts at `POST /v1/apps` or `POST /ui/apps`, described in
+[HTTP API and run statuses](#http-api-and-run-statuses). Both call
+`createRun()` in `app/gateway.ts`. Before the handler runs, Hono's
 `bodyLimit` rejects bodies over 64 KB, and `bearerAuth` or `basicAuth` checks
 the caller.
 
@@ -512,8 +551,7 @@ union of `deployed` (with URLs), `awaiting_blueprint`, `build_failed`,
 
 ## Trust boundaries in the code
 
-This section shows where each boundary is enforced. The rules themselves, as
-a checklist, are in [Invariants in AGENTS.md](../AGENTS.md#invariants).
+This section shows where each boundary is enforced in the running system.
 
 - **Internet to gateway.** `bodyLimit`, `bearerAuth` (a constant-time
   comparison), and `basicAuth` in `createGateway()`. The UI routes inject the
@@ -626,9 +664,9 @@ filesystems are ephemeral, so nothing important lives on disk.
   not a 401 or 403), and `pushVerified()` retries a rejected push on the new
   tip.
 
-There is no step-level checkpointing. If you add resumability, Render
-Workflows' `ctx.step()` is the place to start; see
-[AGENTS.md: Durability](../AGENTS.md#durability).
+There is no step-level resume today: a failed top-level run is final, and the
+caller submits the prompt again. An implementation that adds resumability
+would start with Render Workflows' `ctx.step()`.
 
 ## How the tests are organized
 
