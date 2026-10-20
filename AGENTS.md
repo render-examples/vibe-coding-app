@@ -2,9 +2,9 @@
 
 This file applies to the entire repository. It holds the conventions, the
 invariants (the canonical list of safety boundaries), and the checklists for
-changing the code. For setup, read [docs/QUICKSTART.md](docs/QUICKSTART.md).
-To follow one run through the code, read
-[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
+changing the code. For setup, read
+[docs/0_QUICKSTART.md](docs/0_QUICKSTART.md). To follow one run through the
+code, read [docs/2_ARCHITECTURE.md](docs/2_ARCHITECTURE.md).
 
 ## What this is
 
@@ -41,8 +41,8 @@ repository in a separate sandbox that no agent uses.
 
 ## Running and verifying changes
 
-Setup is in [docs/QUICKSTART.md](docs/QUICKSTART.md). The commands you need
-while changing code:
+Setup is in [docs/0_QUICKSTART.md](docs/0_QUICKSTART.md). The commands you
+need while changing code:
 
 - `npm run check` runs Biome, `tsc`, and Vitest. Run it before you finish.
 - `npx vitest run tests/blueprint.test.ts` runs one file.
@@ -80,7 +80,7 @@ The gateway listens on `0.0.0.0:${PORT:-3000}`. `GET /health` is liveness,
 `POST /v1/apps`, runs are read at `GET /v1/apps/:runId`, and
 `DELETE /v1/apps/:runId` deletes the run's app with all of its runs. The full
 reference is in
-[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md#http-api-and-run-statuses).
+[docs/2_ARCHITECTURE.md](docs/2_ARCHITECTURE.md#gateway).
 
 The browser UI at `/` and `/table` is protected by HTTP Basic Auth
 (`UI_USERNAME`, `UI_PASSWORD`) and submits through `/ui/apps`, which keeps
@@ -636,10 +636,11 @@ a step.
    deleted only through `app/teardown.ts`.
 5. Sandbox cleanup and repeated side effects are safe.
 6. If configuration changed, `.env.example`, `render.yaml`,
-   `scripts/doctor.ts`, `README.md`, `docs/QUICKSTART.md`, and the
-   configuration reference in `docs/QUICKSTART.md` are updated.
-7. If behavior that the docs describe changed, `docs/WALKTHROUGH.md`,
-   `docs/TAKEAWAYS.md`, and `docs/QUICKSTART.md` are updated, and this file's
-   invariants still match the code.
+   `scripts/doctor.ts`, `README.md`, `docs/0_QUICKSTART.md`, and the
+   configuration reference in `docs/1_EXTENSION.md` are updated.
+7. If behavior that the docs describe changed, `docs/2_ARCHITECTURE.md`,
+   `docs/3_TAKEAWAYS.md`, `docs/1_EXTENSION.md`, and
+   `docs/0_QUICKSTART.md` are updated, and this file's invariants still match
+   the code.
 8. Browser UI changes preserve Basic Auth and never serialize secrets.
 9. `npm run check` passes.

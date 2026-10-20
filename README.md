@@ -31,7 +31,7 @@ and checked again at its public URL after Render deploys it.
 It is written for engineers building AI app builders, coding agents, or
 internal platforms on Render, and for anyone who wants a working example of
 those boundaries to read and adapt. It is a demonstration, not a multi-tenant
-product: see [Current limitations](docs/QUICKSTART.md#current-limitations).
+product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
 
 ## Architecture at a glance
 
@@ -85,7 +85,7 @@ product: see [Current limitations](docs/QUICKSTART.md#current-limitations).
 
 ## Quick start
 
-The [Quickstart](docs/QUICKSTART.md) is the canonical setup guide. It covers
+The [Quickstart](docs/0_QUICKSTART.md) is the canonical setup guide. It covers
 installation, local processes, the first app, the one-time apps Blueprint,
 deployment, diagnostics, operations, and cleanup.
 
@@ -98,16 +98,18 @@ Click **Deploy to Render** above, or create a Blueprint from this repository's
 `render.yaml`. It creates the gateway, the workflow service, and their database
 in a `vibe-factory` project, and prompts you for the secrets. If you deploy
 from a fork, first change the `repo:` field of the workflow service in
-`render.yaml` to your fork's URL. [docs/QUICKSTART.md](docs/QUICKSTART.md#5-deploy-the-factory-to-render)
+`render.yaml` to your fork's URL. [docs/0_QUICKSTART.md](docs/0_QUICKSTART.md#deploy-the-factory-to-render)
 has the full steps.
 
 ## Documentation
 
-- [Quickstart](docs/QUICKSTART.md): setup, first run, deploying the factory,
-  configuration, operations, cleanup, and customizing
-- [Walkthrough](docs/WALKTHROUGH.md): one run through the code, plus the HTTP
-  API, trust boundaries, and delete flow
-- [Takeaways](docs/TAKEAWAYS.md): the reusable patterns, and where each lives
+- [Quickstart](docs/0_QUICKSTART.md): setup, first run, deploying the factory,
+  diagnostics, operations, and cleanup
+- [Extension guide](docs/1_EXTENSION.md): factory settings, agents, tools,
+  infrastructure primitives, templates, and pipeline changes
+- [Architecture](docs/2_ARCHITECTURE.md): directory overview, execution paths,
+  core interfaces, trust boundaries, state, and tests
+- [Takeaways](docs/3_TAKEAWAYS.md): lessons to apply in your own agent system
 
 Contributor and coding-agent conventions, invariants, and change checklists
 are in [AGENTS.md](AGENTS.md).
