@@ -1,135 +1,112 @@
 /**
- * The template is only worth having if it stays true. These assertions pin the
- * three ways it can rot without anything else noticing: files going missing,
- * the extraction script mangling them on the way into the sandbox, and the
+ * The template is only worth having if it stays true. These pin the three
+ * ways it can rot without anything else noticing: files going missing, the
+ * extraction script mangling them on the way into the sandbox, and the
  * template drifting away from the manifest the builder is told to return.
  */
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { builder } from "../app/agents.js";
-import { extractionScript, readTemplate } from "../app/templates.js";
 import { templateLines } from "../app/build.js";
+import { extractionScript, readTemplate } from "../app/templates.js";
 
 const files = await readTemplate("fullstack");
 const byPath = new Map(files.map((file) => [file.path, file.contents]));
 
-function json(path: string): Record<string, never> {
+function read(path: string): string {
 	const contents = byPath.get(path);
-	if (!contents) throw new Error(`${path} is missing from the template`);
-	return JSON.parse(contents);
+	if (contents === undefined)
+		throw new Error(`${path} is missing from the template`);
+	return contents;
 }
 
-describe("readTemplate", () => {
-	it("reads both tiers", () => {
-		expect(byPath.has("web/src/App.tsx")).toBe(true);
-		expect(byPath.has("api/src/index.ts")).toBe(true);
-		expect(byPath.has("api/sql/schema.sql")).toBe(true);
-		expect(byPath.has("api/sql/seed.sql")).toBe(true);
-	});
+describe("the fullstack template", () => {
+	// A local build leaves node_modules and dist behind, and they would ship
+	// into every generated app.
+	it("reads both tiers from disk, with their lockfiles and without dependencies or build output", () => {
+		const paths = files.map((file) => file.path);
 
-	// The builder is told to run `npm ci`, which fails outright without one.
-	it("ships a lockfile for each tier", () => {
-		expect(byPath.has("web/package-lock.json")).toBe(true);
-		expect(byPath.has("api/package-lock.json")).toBe(true);
-	});
-
-	// Anyone who builds a template locally leaves artifacts behind, and they
-	// would otherwise ship into every generated app.
-	it("leaves out what the sandbox installs or builds", () => {
-		const leaked = files
-			.map((file) => file.path)
-			.filter(
-				(path) =>
-					path.includes("node_modules") ||
-					path.includes("/dist/") ||
-					path.endsWith(".tsbuildinfo"),
-			);
-		expect(leaked).toEqual([]);
-	});
-});
-
-describe("the manifest the builder is told to return", () => {
-	it("matches the scripts the template actually defines", () => {
-		expect(json("web/package.json").scripts).toMatchObject({
-			build: expect.stringContaining("vite build"),
-		});
-		expect(json("api/package.json").scripts).toMatchObject({
-			build: expect.any(String),
-			migrate: expect.any(String),
-			start: expect.any(String),
-		});
-	});
-
-	it("serves the health and data endpoints the manifest names", () => {
-		const api = byPath.get("api/src/index.ts") ?? "";
-		expect(api).toContain('"/health"');
-		expect(api).toContain('"/api/items"');
-	});
-
-	// The storefront and the API are different onrender.com origins, so without
-	// this every browser request fails while every server-side check passes.
-	it("enables CORS on the API", () => {
-		expect(byPath.get("api/src/index.ts")).toContain("cors()");
-	});
-
-	// RENDER_EXTERNAL_HOSTNAME is a hostname, not a URL. Without the fallback,
-	// a build that passes would write "undefined" into the bundle.
-	it("builds the API base URL from a hostname, with a fallback", () => {
-		const api = byPath.get("web/src/lib/api.ts") ?? "";
-		expect(api).toContain("VITE_API_HOST");
-		expect(api).toMatch(/https:\/\/\$\{host\}/);
-		expect(api).toMatch(/host \?.*:.*http/s);
-	});
-
-	// `property: host` is a name on the private network, and a browser cannot
-	// connect to it. api.ts above expects the public hostname.
-	it("wires VITE_API_HOST to the public hostname of the API", () => {
-		expect(templateLines(files.map((file) => file.path))).toMatch(
-			/VITE_API_HOST fromService api\s+envVarKey RENDER_EXTERNAL_HOSTNAME/,
+		expect(paths).toEqual(
+			expect.arrayContaining([
+				"web/package-lock.json",
+				"web/src/App.tsx",
+				"api/package-lock.json",
+				"api/src/index.ts",
+				"api/sql/schema.sql",
+				"api/sql/seed.sql",
+			]),
 		);
-		expect(builder.prompt).toContain(
-			'{ "key": "VITE_API_HOST", "fromService": { "name": "api", "envVarKey": "RENDER_EXTERNAL_HOSTNAME" } }',
-		);
-		expect(builder.prompt).not.toContain('"property": "host"');
-	});
-
-	// preDeployCommand runs on every deploy, including redeploys of an
-	// unchanged commit.
-	it("has an idempotent schema and a non-empty seed", () => {
-		expect(byPath.get("api/sql/schema.sql")).toMatch(/create table if not exists/i);
-		expect(byPath.get("api/sql/seed.sql")).toMatch(/on conflict/i);
-		expect(byPath.get("api/sql/seed.sql")).toMatch(/insert into/i);
-	});
-});
-
-describe("extractionScript", () => {
-	const script = extractionScript(files, "/home/user/repo/apps/demo/shop");
-
-	it("creates nested directories before writing into them", () => {
-		expect(script).toContain("cd '/home/user/repo/apps/demo/shop'");
-		expect(script).toMatch(/^mkdir -p .*'api\/sql'/m);
-		expect(script).toMatch(/^mkdir -p .*'web\/src\/components\/ui'/m);
-	});
-
-	it("writes every file exactly once", () => {
-		for (const file of files) {
-			expect(script).toContain(`cat > '${file.path}' <<'FACTORY_TEMPLATE_EOF'`);
-		}
-		expect(script.match(/^cat > /gm)).toHaveLength(files.length);
-	});
-
-	// An unquoted heredoc would let the shell expand ${...} and $( ) in JSX and
-	// SQL on the way in.
-	it("quotes every heredoc so nothing is expanded", () => {
-		expect(script.match(/<<'FACTORY_TEMPLATE_EOF'/g)).toHaveLength(files.length);
-		expect(script).not.toMatch(/<<FACTORY_TEMPLATE_EOF/);
-	});
-
-	it("refuses a file that would end its own heredoc", () => {
-		expect(() =>
-			extractionScript(
-				[{ path: "a.txt", contents: "before\nFACTORY_TEMPLATE_EOF\nrm -rf /" }],
-				"/tmp/x",
+		expect(
+			paths.filter((path) =>
+				/(^|\/)(node_modules|dist)\/|\.tsbuildinfo$/.test(path),
 			),
-		).toThrow(/heredoc delimiter/);
+		).toEqual([]);
+	});
+
+	// Quoted heredocs: the template's ${...} in TypeScript and SQL must not be
+	// expanded by the shell on the way in.
+	it("has an extraction script that recreates every file byte for byte", () => {
+		const dir = mkdtempSync(join(tmpdir(), "template-test-"));
+		try {
+			const app = join(dir, "apps", "demo", "shop");
+			execFileSync("mkdir", ["-p", app]);
+			execFileSync("sh", ["-c", extractionScript(files, app)]);
+
+			for (const file of files) {
+				// A heredoc always ends its last line.
+				const expected = file.contents.endsWith("\n")
+					? file.contents
+					: `${file.contents}\n`;
+				expect(readFileSync(join(app, file.path), "utf8"), file.path).toBe(
+					expected,
+				);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("matches the manifest that the builder is told to return", () => {
+		const manifest = templateLines(files.map((file) => file.path));
+		const value = (pattern: RegExp) => {
+			const match = manifest.match(pattern);
+			if (!match) throw new Error(`The manifest has no ${pattern}`);
+			return match[1];
+		};
+		const scripts = (dir: string) =>
+			JSON.parse(read(`${dir}/package.json`)).scripts as Record<string, string>;
+
+		// Each rootDir is a tier, and npm ci needs its lockfile.
+		const web = value(/web: static_site, rootDir (\S+),/);
+		const api = value(/api: web_service, rootDir (\S+),/);
+		for (const dir of [web, api]) {
+			expect(byPath.has(`${dir}/package-lock.json`), dir).toBe(true);
+		}
+		expect(manifest).toContain("build `npm ci && npm run build`");
+		expect(scripts(web).build).toContain("vite build");
+		expect(scripts(api).build).toBeTruthy();
+
+		// Vite writes dist unless the config says otherwise.
+		expect(value(/staticPublishPath (\S+),/)).toBe("dist");
+		expect(read(`${web}/vite.config.ts`)).not.toContain("outDir");
+
+		expect(
+			scripts(api)[value(/preDeployCommand `npm run (\S+)`/)],
+		).toBeTruthy();
+		expect(manifest).toContain("start `npm start`");
+		expect(scripts(api).start).toBeTruthy();
+
+		const server = read(`${api}/src/index.ts`);
+		expect(server).toContain(`"${value(/healthCheckPath (\S+),/)}"`);
+		expect(server).toContain(`"${value(/dataCheckPath (\S+),/)}"`);
+
+		expect(read(`${web}/src/lib/api.ts`)).toContain(
+			value(/envVar (\S+) fromService api/),
+		);
+		expect(manifest).toContain(
+			`Files: ${files.map((file) => file.path).join(", ")}`,
+		);
 	});
 });

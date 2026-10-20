@@ -5,6 +5,7 @@ import { type Sandbox, shellEscape } from "./sandbox.js";
 
 export const MAX_OUTPUT_CHARS = 50_000;
 export const MAX_READ_CHARS = 100_000;
+export const SANDBOX_COMMAND_TIMEOUT_SECONDS = 10 * 60;
 
 export type ZodShape = Record<string, z.ZodType>;
 
@@ -164,28 +165,42 @@ const execSchema = {
 		.describe("Working directory. Defaults to the app directory."),
 };
 
-export const sandboxExec: Tool<typeof execSchema> = {
-	name: "sandbox__exec",
-	description:
-		"Execute a shell command in the sandbox, from the app directory unless cwd says otherwise. " +
-		"Returns combined stdout/stderr and the exit code. " +
-		"A non-zero exit code is normal output (e.g. failing tests), not a tool error.",
-	inputSchema: execSchema,
-	async invoke(input, ctx): Promise<ToolResult> {
-		// Always cd first. The exec API starts in `/`, so a command built from
-		// relative paths would otherwise write outside the checkout.
-		const cwd = resolveSandboxPath(ctx.workDir, input.cwd ?? ".");
-		if ("error" in cwd) return pathError(cwd.error);
+export function sandboxExecTool(
+	timeoutSeconds = SANDBOX_COMMAND_TIMEOUT_SECONDS,
+): Tool<typeof execSchema> {
+	return {
+		name: "sandbox__exec",
+		description:
+			"Execute a shell command in the sandbox, from the app directory unless cwd says otherwise. " +
+			`Commands stop after ${timeoutSeconds} seconds. Returns combined stdout/stderr and the exit code. ` +
+			"A non-zero exit code is normal output (e.g. failing tests), not a tool error.",
+		inputSchema: execSchema,
+		async invoke(input, ctx): Promise<ToolResult> {
+			// Always cd first. The exec API starts in `/`, so a command built from
+			// relative paths would otherwise write outside the checkout.
+			const cwd = resolveSandboxPath(ctx.workDir, input.cwd ?? ".");
+			if ("error" in cwd) return pathError(cwd.error);
 
-		const command = `cd ${shellEscape(cwd.path)} && ${input.command}`;
-		const { output, exitCode } = await ctx.sandbox.run(command);
-		const body = truncate(output) || "(no output)";
-		return {
-			content: exitCode === 0 ? body : `Exit code: ${exitCode}\n${body}`,
-			isError: exitCode !== 0,
-		};
-	},
-};
+			const command =
+				`cd ${shellEscape(cwd.path)} && ` +
+				`timeout --signal=TERM --kill-after=5s ${timeoutSeconds}s sh -c ${shellEscape(input.command)}`;
+			const { output, exitCode } = await ctx.sandbox.run(command);
+			if (exitCode === 124 || exitCode === 137) {
+				return {
+					content: `Command timed out after ${timeoutSeconds} seconds.${output ? `\n${truncate(output)}` : ""}`,
+					isError: true,
+				};
+			}
+			const body = truncate(output) || "(no output)";
+			return {
+				content: exitCode === 0 ? body : `Exit code: ${exitCode}\n${body}`,
+				isError: exitCode !== 0,
+			};
+		},
+	};
+}
+
+export const sandboxExec = sandboxExecTool();
 
 const applyPatchSchema = {
 	diff: z.string().describe("A unified diff in `git apply` format."),
@@ -211,8 +226,9 @@ export const sandboxApplyPatch: Tool<typeof applyPatchSchema> = {
 		const patchPath = `/tmp/.vibe-${Date.now()}-${++patchCounter}.patch`;
 		await ctx.sandbox.upload(patchPath, input.diff);
 
+		const patch = shellEscape(patchPath);
 		const { output, exitCode } = await ctx.sandbox.run(
-			`cd ${shellEscape(cwd.path)} && git apply --whitespace=nowarn ${patchPath} && rm ${patchPath}`,
+			`(cd ${shellEscape(cwd.path)} && git apply --whitespace=nowarn ${patch}); status=$?; rm -f ${patch}; exit $status`,
 		);
 		if (exitCode !== 0) {
 			return {

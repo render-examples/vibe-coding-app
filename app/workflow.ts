@@ -30,7 +30,7 @@ import {
 	removeFromBlueprintTask,
 	waitForSyncsTask,
 } from "./delete.js";
-import { awaitDeployment } from "./deploy.js";
+import { awaitDeployment, deploysBeforePublish } from "./deploy.js";
 import { initAppDir } from "./git.js";
 import { collectImages } from "./images.js";
 import { oneLine, publishAppTask } from "./publish.js";
@@ -59,7 +59,7 @@ const DELETE_TIMEOUT_SECONDS = 4 * DELETE_STEP_TIMEOUT_SECONDS;
 export const promptToApp = task(
 	{
 		name: "prompt-to-app",
-		plan: "standard",
+		plan: "flex",
 		timeoutSeconds: SANDBOX_TIMEOUT_SECONDS,
 		// Render Workflows retries a failed run three times by default. A retry
 		// starts again at the architect with a new sandbox, and after a push it
@@ -197,7 +197,10 @@ async function run(
 
 		// ── Publish ─────────────────────────────────────────────────────
 		await setRunStage(runId, "publishing");
-		const { commit } = await tasks.run(publishAppTask, {
+		// Before the push: right after it, the newest deploys of a service that
+		// a rerun replaces are still those of the old app.
+		const deploysBefore = await deploysBeforePublish(workspaceId, spec);
+		const { commit, changedServices } = await tasks.run(publishAppTask, {
 			sandboxId: sandbox.id,
 			spec,
 			message: `${user}/${appName}: ${oneLine(prompt)}`,
@@ -217,6 +220,8 @@ async function run(
 			runId,
 			summary: built.summary,
 			databaseUrl,
+			deploysBefore,
+			changedServices,
 		});
 	} finally {
 		await sandbox
@@ -255,7 +260,7 @@ interface DeleteResult {
 export const deleteApp = task(
 	{
 		name: "delete-app",
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: DELETE_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},

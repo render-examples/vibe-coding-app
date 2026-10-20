@@ -9,7 +9,12 @@ import {
 	appRelativePath,
 	factoryConfig,
 } from "../factory.config.js";
-import { appBlueprint, declaredResources, rootBlueprint } from "./blueprint.js";
+import {
+	appBlueprint,
+	declaredResources,
+	joinServiceDir,
+	rootBlueprint,
+} from "./blueprint.js";
 import { appsRepo } from "./config.js";
 import {
 	type AppSpec,
@@ -17,14 +22,14 @@ import {
 	type PublishAppInput,
 	publishAppInputSchema,
 } from "./contracts.js";
+import { readAppFiles, writeAppFiles } from "./files.js";
 import {
 	cloneAppsRepo,
 	commitPaths,
-	githubToken,
+	headChangedPaths,
 	pushVerified,
-	readAppFiles,
-	writeAppFiles,
 } from "./git.js";
+import { githubToken } from "./github.js";
 import {
 	connectSandbox,
 	createSandbox,
@@ -41,7 +46,8 @@ const PUBLISH_TIMEOUT_SECONDS = 10 * 60;
  * the app's render.yaml and README, and the root Blueprint from the spec,
  * commit them with the app, and push. Render deploys the push, so the parent
  * starts this only after verify-app passes. Returns the pushed commit, or
- * null when no file changed.
+ * null when no file changed, and the services that Render deploys again for
+ * it.
  *
  * The builder can run any command in the sandbox of the run. A process that
  * it starts stays after the command, and it can change git itself. So the
@@ -54,14 +60,14 @@ const PUBLISH_TIMEOUT_SECONDS = 10 * 60;
 export const publishAppTask = task(
 	{
 		name: "publish-app",
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: PUBLISH_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},
 	async function publishApp(
 		_tasks: TaskContext,
 		input: PublishAppInput,
-	): Promise<{ commit: string | null }> {
+	): Promise<PublishResult> {
 		const { sandboxId, spec, message } = publishAppInputSchema.parse(input);
 		const repoUrl = appsRepo().url;
 		const appDir = appPath(spec.user, spec.appName);
@@ -71,23 +77,60 @@ export const publishAppTask = task(
 		if ("error" in built) {
 			throw new Error(`publish-app did not copy the app. ${built.error}`);
 		}
-		const commit = await inAppsClone(PUBLISH_TIMEOUT_SECONDS, (clone) =>
-			commitAndPush(clone, spec, message, async () => {
-				await writeAppFiles(clone.sandbox, appDir, built.files);
-				await writeBlueprints(clone.sandbox, spec, appDir, repoUrl);
-			}),
+		const published = await inAppsClone(
+			PUBLISH_TIMEOUT_SECONDS,
+			async (clone): Promise<PublishResult> => {
+				const commit = await commitAndPush(clone, spec, message, async () => {
+					await writeAppFiles(clone.sandbox, appDir, built.files);
+					await writeBlueprints(clone.sandbox, spec, appDir, repoUrl);
+				});
+				if (!commit) return { commit, changedServices: [] };
+				return {
+					commit,
+					changedServices: servicesChangedBy(
+						spec,
+						await headChangedPaths(clone.sandbox),
+					),
+				};
+			},
 		);
 		console.log(
 			JSON.stringify({
 				event: "app_published",
 				user: spec.user,
 				appName: spec.appName,
-				commit,
+				...published,
 			}),
 		);
-		return { commit };
+		return published;
 	},
 );
+
+export interface PublishResult {
+	/** The pushed commit, or null when no file changed. */
+	commit: string | null;
+	/** The manifest services that the commit gives a new deploy. */
+	changedServices: string[];
+}
+
+/**
+ * The manifest services whose directory holds a path that the commit
+ * changes. The buildFilter of each service is its directory, so Render
+ * deploys only these again. A rootDir of "." is the app directory, which
+ * holds factory.json.
+ */
+export function servicesChangedBy(
+	spec: AppSpec,
+	changedPaths: readonly string[],
+): string[] {
+	const root = appRelativePath(spec.user, spec.appName);
+	return spec.manifest.services
+		.filter((service) => {
+			const dir = joinServiceDir(root, service.rootDir);
+			return changedPaths.some((path) => path.startsWith(`${dir}/`));
+		})
+		.map((service) => service.name);
+}
 
 async function writeBlueprints(
 	sandbox: Sandbox,

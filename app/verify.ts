@@ -11,22 +11,24 @@ import {
 	type VerifyAppInput,
 	verifyAppInputSchema,
 } from "./contracts.js";
-import {
-	appGitignore,
-	readAppFiles,
-	removeIgnored,
-	runVerification,
-} from "./git.js";
+import { readAppFiles } from "./files.js";
+import { appGitignore, removeIgnored } from "./git.js";
 import { connectSandbox, type Sandbox, shellEscape } from "./sandbox.js";
 
 /** verify-app builds each service and boots each web service. */
 const VERIFY_TIMEOUT_SECONDS = 30 * 60;
+const MAX_VERIFY_OUTPUT_CHARS = 10_000;
 const SMOKE_PORT = 8099;
 const BOOT_ATTEMPTS = 15;
 /** Proves a health endpoint answers before Postgres is reachable, as Render requires. */
 const UNREACHABLE_DATABASE_URL = "postgres://unreachable/db";
 /** `fromService` properties that give an address on Render's private network. */
 const PRIVATE_NETWORK_PROPERTIES = new Set(["host", "port", "hostport"]);
+
+interface VerificationResult {
+	passed: boolean;
+	failures: string;
+}
 
 /**
  * Verify the builder's files in the sandbox. A check that fails is a result,
@@ -41,7 +43,7 @@ export const verifyAppTask = task(
 	{
 		name: "verify-app",
 		// The builds run in the sandbox, not on the compute of this task.
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: VERIFY_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},
@@ -119,8 +121,6 @@ async function verify(
 		failures.push(...checkStaticSiteEnvVars(service));
 
 		const serviceDir = joinServiceDir(appDir, service.rootDir);
-
-		// Run the build command.
 		const build = await runVerification(sandbox, serviceDir, [
 			service.buildCommand,
 		]);
@@ -148,7 +148,6 @@ async function verify(
 					`${service.name}: index.html is only ${index.output.length} bytes — the build produced an empty page.`,
 				);
 			} else {
-				// Check for placeholder content in the built output.
 				const placeholders = await checkForPlaceholders(sandbox, publishDir);
 				failures.push(...placeholders);
 			}
@@ -165,6 +164,31 @@ async function verify(
 	if ("error" in publishable) failures.push(publishable.error);
 
 	return failures;
+}
+
+/** Run commands in a directory and summarize failures. */
+async function runVerification(
+	sandbox: Sandbox,
+	dir: string,
+	commands: readonly string[],
+): Promise<VerificationResult> {
+	const failures: string[] = [];
+
+	for (const command of commands) {
+		const { output, exitCode } = await sandbox.run(
+			`cd ${shellEscape(dir)} && ${command}`,
+		);
+		if (exitCode !== 0) {
+			failures.push(
+				`Command: ${command}\nExit code: ${exitCode}\nOutput:\n${output.slice(0, MAX_VERIFY_OUTPUT_CHARS)}`,
+			);
+		}
+	}
+
+	return {
+		passed: failures.length === 0,
+		failures: failures.join("\n\n---\n\n"),
+	};
 }
 
 /**

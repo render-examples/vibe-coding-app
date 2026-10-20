@@ -127,14 +127,34 @@ export async function ping(): Promise<void> {
 }
 
 /**
+ * The advisory lock of claimRun: any fixed key. withAppLock takes the
+ * two-key form, and Postgres keeps the one-key and two-key lock spaces
+ * apart, so no app lock is this lock.
+ */
+const RUN_CLAIM_LOCK = 0x76696265;
+
+/**
  * Run statements in one transaction that holds the lock of one app. A delete
  * takes the lock to claim the runs of the app, and a run takes it to claim an
  * app name. So a run cannot start to build an app while it is being deleted,
  * or while a different run builds it.
  */
-async function withAppLock<T>(
+function withAppLock<T>(
 	user: string,
 	appName: string,
+	work: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+	return withLock(
+		"select pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+		[user, appName],
+		work,
+	);
+}
+
+/** Run statements in one transaction that holds an advisory lock. */
+async function withLock<T>(
+	lock: string,
+	values: readonly unknown[],
 	work: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
 	const client = await db().connect();
@@ -151,10 +171,7 @@ async function withAppLock<T>(
 		await client.query("begin");
 		// The lock must come before the reads: a statement sees only the rows
 		// that were committed when it started.
-		await client.query(
-			"select pg_advisory_xact_lock(hashtext($1), hashtext($2))",
-			[user, appName],
-		);
+		await client.query(lock, [...values]);
 		const result = await work(client);
 		await client.query("commit");
 		return result;
@@ -170,39 +187,50 @@ async function withAppLock<T>(
 }
 
 /**
- * Claim a run. Postgres enforces both limits rather than application code:
- * the unique idempotency key stops a duplicate curl, and the conditional
- * insert stops the factory from running more sandboxes than it should.
+ * Claim a run. The unique idempotency key stops a duplicate curl, and the
+ * conditional insert stops the factory from running more sandboxes than it
+ * should.
+ *
+ * Under READ COMMITTED, two concurrent inserts each count the running rows
+ * without the row of the other, and both can pass the cap. So each claim
+ * holds one advisory lock, and a claim counts after the commit of the claim
+ * before it.
  */
-export async function claimRun(input: {
+export function claimRun(input: {
 	id: string;
 	idempotencyKey: string;
 	prompt: string;
 	user: string;
 }): Promise<ClaimResult> {
-	const inserted = await db().query(
-		`insert into runs (id, idempotency_key, prompt, user_name)
-		 select $1, $2, $3, $4
-		 where (select count(*) from runs where status = 'running') < $5
-		 on conflict (idempotency_key) do nothing`,
-		[
-			input.id,
-			input.idempotencyKey,
-			input.prompt,
-			input.user,
-			factoryConfig.maxConcurrentRuns,
-		],
-	);
-	if (inserted.rowCount === 1) return { claimed: true };
+	return withLock(
+		"select pg_advisory_xact_lock($1::bigint)",
+		[RUN_CLAIM_LOCK],
+		async (client): Promise<ClaimResult> => {
+			const inserted = await client.query(
+				`insert into runs (id, idempotency_key, prompt, user_name)
+				 select $1, $2, $3, $4
+				 where (select count(*) from runs where status = 'running') < $5
+				 on conflict (idempotency_key) do nothing`,
+				[
+					input.id,
+					input.idempotencyKey,
+					input.prompt,
+					input.user,
+					factoryConfig.maxConcurrentRuns,
+				],
+			);
+			if (inserted.rowCount === 1) return { claimed: true };
 
-	// Nothing inserted: either the key was seen before or we are at capacity.
-	const { rows } = await db().query(
-		"select id from runs where idempotency_key = $1",
-		[input.idempotencyKey],
+			// Nothing inserted: either the key was seen before or we are at capacity.
+			const { rows } = await client.query<{ id: string }>(
+				"select id from runs where idempotency_key = $1",
+				[input.idempotencyKey],
+			);
+			return rows.length > 0
+				? { claimed: false, reason: "duplicate", runId: rows[0].id }
+				: { claimed: false, reason: "at_capacity" };
+		},
 	);
-	return rows.length > 0
-		? { claimed: false, reason: "duplicate", runId: rows[0].id }
-		: { claimed: false, reason: "at_capacity" };
 }
 
 /**

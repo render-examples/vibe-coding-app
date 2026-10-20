@@ -41,7 +41,7 @@ const SYNC_TIMEOUT_MS = 6 * 60 * 1000;
  * more time than SYNC_TIMEOUT_MS.
  */
 const DELETE_STEP = {
-	plan: "starter",
+	plan: "flex",
 	timeoutSeconds: DELETE_STEP_TIMEOUT_SECONDS,
 	retry: { maxRetries: 0, waitDurationMs: 0 },
 };

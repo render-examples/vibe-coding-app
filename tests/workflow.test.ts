@@ -1,15 +1,14 @@
 /**
- * The pipelines in app/workflow.ts. No test calls a live service: the agents,
- * the store, Git commit and push, the Render reads, and the Render deletes are
- * fakes.
+ * The two pipelines in app/workflow.ts, end to end: prompt-to-app (design,
+ * build, verify, publish, deploy) and delete-app. The tests drive the task
+ * bodies and fake only the system boundaries: the agents, the store, the
+ * sandboxes, Git clone and push, GitHub, Render reads, and Render deletes.
  */
 import { type TaskContext, TaskRegistry } from "@renderinc/sdk/workflows";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parse } from "yaml";
 import { appPath, factoryConfig } from "../factory.config.js";
-import { rootBlueprint } from "../app/blueprint.js";
 import type { AppSpec, Manifest, Service } from "../app/contracts.js";
-import type { AppFile } from "../app/git.js";
+import type { AppFile } from "../app/files.js";
 import type { DeployOutcome } from "../app/render.js";
 import type { ExecResult, Sandbox } from "../app/sandbox.js";
 import type { AppClaim } from "../app/store.js";
@@ -19,10 +18,10 @@ import {
 	removeFromBlueprintTask,
 	waitForSyncsTask,
 } from "../app/delete.js";
-import { awaitDeployment } from "../app/deploy.js";
+import { awaitDeployment, type DeployContext } from "../app/deploy.js";
 import { publishAppTask } from "../app/publish.js";
-import { checkStaticSiteEnvVars, verifyAppTask } from "../app/verify.js";
-import { deleteApp, promptToApp, removeApp } from "../app/workflow.js";
+import { verifyAppTask } from "../app/verify.js";
+import { deleteApp, promptToApp } from "../app/workflow.js";
 
 const mocks = vi.hoisted(() => ({
 	architectTask: vi.fn(),
@@ -38,6 +37,7 @@ const mocks = vi.hoisted(() => ({
 	connectSandbox: vi.fn(),
 	fetchDeployLogs: vi.fn(),
 	findBlueprint: vi.fn(),
+	latestDeploys: vi.fn(async () => new Map<string, string>()),
 	pageContains: vi.fn(),
 	waitForServices: vi.fn(),
 	waitForDeploy: vi.fn(),
@@ -48,8 +48,6 @@ const mocks = vi.hoisted(() => ({
 	deleteRuns: vi.fn(async () => {}),
 	failDelete: vi.fn(async () => {}),
 	finishRun: vi.fn(async () => {}),
-	setRunSandbox: vi.fn(async () => {}),
-	sandboxGroupId: vi.fn(async (): Promise<string | null> => "sbg-test"),
 }));
 
 vi.mock("../app/agents.js", () => ({
@@ -58,57 +56,31 @@ vi.mock("../app/agents.js", () => ({
 	deployManagerTask: { name: "deploy-manager", func: mocks.deployManagerTask },
 }));
 
-/**
- * Runs each subtask in this process, with the body of its task definition. As
- * on Render, the input and the result go through JSON.
- */
-const tasks: TaskContext = {
-	run: async (task, ...args) => wire(await task.func(tasks, ...wire(args))),
-};
-
-function wire<T>(value: T): T {
-	return value === undefined ? value : JSON.parse(JSON.stringify(value));
-}
-
-/** Runs each subtask as `tasks` does, and records its name and its input. */
-function recordSubtasks(): {
-	context: TaskContext;
-	runs: { name: string; input: unknown }[];
-} {
-	const runs: { name: string; input: unknown }[] = [];
-	return {
-		runs,
-		context: {
-			run: (task, ...args) => {
-				runs.push({ name: task.name, input: args[0] });
-				return tasks.run(task, ...args);
-			},
-		},
-	};
-}
-
 vi.mock("../app/store.js", () => ({
 	claimRunApp: mocks.claimRunApp,
 	deleteRuns: mocks.deleteRuns,
 	failDelete: mocks.failDelete,
 	finishRun: mocks.finishRun,
 	setDeleteProgress: vi.fn(async () => {}),
-	setRunSandbox: mocks.setRunSandbox,
+	setRunSandbox: vi.fn(async () => {}),
 	setRunStage: vi.fn(async () => {}),
 	setRunUrls: vi.fn(async () => {}),
 	touchRun: vi.fn(async () => {}),
 }));
 
-// Commit and push go to GitHub. The copy of the files of an app is a fake
-// that moves files between two fake sandboxes: tests/git.test.ts runs the
-// real one with git and tar. The verification commands stay real and go to
-// the fake sandbox.
+// tests/git.test.ts and tests/files.test.ts run the real commit, push, and
+// tar copy. Here the copy moves files between two fake sandboxes.
 vi.mock("../app/git.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../app/git.js")>()),
 	commitPaths: mocks.commitPaths,
 	pushVerified: mocks.pushVerified,
-	githubToken: mocks.githubToken,
 	cloneAppsRepo: mocks.cloneAppsRepo,
+}));
+
+vi.mock("../app/github.js", () => ({ githubToken: mocks.githubToken }));
+
+vi.mock("../app/files.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../app/files.js")>()),
 	readAppFiles: mocks.readAppFiles,
 	writeAppFiles: mocks.writeAppFiles,
 }));
@@ -117,7 +89,7 @@ vi.mock("../app/sandbox.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../app/sandbox.js")>()),
 	createSandbox: mocks.createSandbox,
 	connectSandbox: mocks.connectSandbox,
-	sandboxGroupId: mocks.sandboxGroupId,
+	sandboxGroupId: vi.fn(async () => "sbg-test"),
 }));
 
 vi.mock("../app/teardown.js", () => ({
@@ -129,16 +101,30 @@ vi.mock("../app/render.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../app/render.js")>()),
 	fetchDeployLogs: mocks.fetchDeployLogs,
 	findBlueprint: mocks.findBlueprint,
+	latestDeploys: mocks.latestDeploys,
 	pageContains: mocks.pageContains,
 	waitForServices: mocks.waitForServices,
 	waitForDeploy: mocks.waitForDeploy,
 	waitForHttpOk: mocks.waitForHttpOk,
 }));
 
-const PRIVATE_NETWORK_PROPERTIES = ["host", "port", "hostport"];
+/* ── Fixtures ─────────────────────────────────────────────────────────── */
+
+const INPUT = {
+	prompt: "Sell handmade walnut furniture online",
+	user: "demo",
+	runId: "run-1",
+};
+const SHOP_APP = { user: "demo", appName: "shop" };
+const APP_DIR = appPath("demo", "shop");
+const APP_SPEC = `${APP_DIR}/factory.json`;
+const APP_SOURCE = `${APP_DIR}/web/index.html`;
+const ROOT_BLUEPRINT = `${factoryConfig.repoDir}/${factoryConfig.blueprintPath}`;
+const STOREFRONT_HTML = `<!doctype html><html><body>${"<p>Walnut chairs, oak tables, and ash stools, made by hand in Portland.</p>".repeat(5)}</body></html>`;
+const SHA = "c".repeat(40);
 
 const storefront: Service = {
-	name: "storefront",
+	name: "web",
 	kind: "static_site",
 	rootDir: "web",
 	runtime: "static",
@@ -153,93 +139,20 @@ const api: Service = {
 	runtime: "node",
 	buildCommand: "npm ci && npm run build",
 	startCommand: "npm start",
+	preDeployCommand: "npm run migrate",
+	healthCheckPath: "/health",
+	dataCheckPath: "/api/items",
+	envVars: [
+		{ key: "DATABASE_URL", fromDatabase: { property: "connectionString" } },
+	],
 };
 
-/**
- * A browser uses the env vars of a static site, and a static site is not on
- * Render's private network. Verification must find a private-network value
- * before the push. After the push, the Blueprint creates every resource.
- */
-describe("checkStaticSiteEnvVars", () => {
-	it.each(PRIVATE_NETWORK_PROPERTIES)(
-		"rejects fromService property %s on a static site",
-		(property) => {
-			const failures = checkStaticSiteEnvVars({
-				...storefront,
-				envVars: [
-					{ key: "VITE_API_HOST", fromService: { name: "api", property } },
-				],
-			});
+const siteOnly: Manifest = { services: [storefront] };
 
-			expect(failures).toHaveLength(1);
-			expect(failures[0]).toMatch(/^storefront: envVar VITE_API_HOST /);
-			expect(failures[0]).toContain(
-				"A browser cannot connect to a private-network name.",
-			);
-			expect(failures[0]).toContain(
-				`Replace property ${property} with envVarKey RENDER_EXTERNAL_HOSTNAME`,
-			);
-		},
-	);
-
-	it("accepts the public hostname of the API on a static site", () => {
-		expect(
-			checkStaticSiteEnvVars({
-				...storefront,
-				envVars: [
-					{
-						key: "VITE_API_HOST",
-						fromService: { name: "api", envVarKey: "RENDER_EXTERNAL_HOSTNAME" },
-					},
-				],
-			}),
-		).toEqual([]);
-	});
-
-	// Services connect to each other on the private network.
-	it.each(PRIVATE_NETWORK_PROPERTIES)(
-		"accepts fromService property %s on a web service",
-		(property) => {
-			expect(
-				checkStaticSiteEnvVars({
-					...api,
-					envVars: [
-						{ key: "SEARCH_HOST", fromService: { name: "search", property } },
-					],
-				}),
-			).toEqual([]);
-		},
-	);
-});
-
-const APP_DIR = appPath("demo", "shop");
-const APP_SPEC = `${APP_DIR}/factory.json`;
-const APP_BLUEPRINT = `${APP_DIR}/render.yaml`;
-const ROOT_BLUEPRINT = `${factoryConfig.repoDir}/${factoryConfig.blueprintPath}`;
-const API_URL = "https://acme-demo-shop-api.onrender.com";
-
-const STOREFRONT_HTML = `<!doctype html><html><body>${"<p>Walnut chairs, oak tables, and ash stools, made by hand in Portland.</p>".repeat(5)}</body></html>`;
-
-const LIVE: DeployOutcome = {
-	deployId: "dep-2",
-	status: "live",
-	result: "live",
-};
-const FAILED: DeployOutcome = {
-	deployId: "dep-1",
-	status: "pre_deploy_failed",
-	result: "failed",
-};
-
-const manifest: Manifest = {
+const fullstack: Manifest = {
 	services: [
 		{
-			name: "web",
-			kind: "static_site",
-			rootDir: "web",
-			runtime: "static",
-			buildCommand: "npm ci && npm run build",
-			staticPublishPath: "dist",
+			...storefront,
 			envVars: [
 				{
 					key: "VITE_API_HOST",
@@ -247,111 +160,109 @@ const manifest: Manifest = {
 				},
 			],
 		},
-		{
-			name: "api",
-			kind: "web_service",
-			rootDir: "api",
-			runtime: "node",
-			buildCommand: "npm ci && npm run build",
-			startCommand: "npm start",
-			preDeployCommand: "npm run migrate",
-			healthCheckPath: "/health",
-			dataCheckPath: "/api/items",
-			envVars: [
-				{ key: "DATABASE_URL", fromDatabase: { property: "connectionString" } },
-			],
-		},
+		api,
 	],
 	databases: [{ name: "db" }],
 };
 
+/** A storefront that bundles the private-network host of the API. */
+const privateHost: Manifest = {
+	services: [
+		{
+			...storefront,
+			envVars: [
+				{
+					key: "VITE_API_HOST",
+					fromService: { name: "api", property: "host" },
+				},
+			],
+		},
+	],
+};
+
+/** The shop app as its first push published it. */
 const spec: AppSpec = {
 	user: "demo",
 	appName: "shop",
-	prompt: "Sell handmade walnut furniture online",
+	prompt: INPUT.prompt,
 	summary: "A storefront, an API, and Postgres behind it.",
 	createdAt: "2026-01-01T00:00:00.000Z",
-	// Not the default prefix. If a repair makes a new spec instead of a copy,
-	// every resource name changes and these tests fail.
+	// Not the default prefix, so a repair that rebuilt the spec instead of
+	// copying it would rename every resource.
 	resourcePrefix: "acme",
-	manifest,
+	manifest: fullstack,
 };
+const cafe: AppSpec = { ...spec, appName: "cafe", prompt: "A menu for a cafe" };
+const CAFE_SPEC = `${appPath("demo", "cafe")}/factory.json`;
+const WEB_ID = "srv-acme-demo-shop-web";
+const API_ID = "srv-acme-demo-shop-api";
 
-/** A repair that changes only how the API deploys: no source file changes. */
-const repair = withApi({
-	preDeployCommand: "npm run db:migrate",
-	dataCheckPath: "/api/products",
-});
-
-function withApi(changes: Partial<Service>): Manifest {
+function plan(...kinds: string[]) {
 	return {
-		...manifest,
-		services: manifest.services.map((service) =>
-			service.name === "api" ? { ...service, ...changes } : service,
-		),
+		appName: "shop",
+		summary: "A storefront for handmade walnut furniture.",
+		tiers: kinds.map((kind) => ({ kind, reason: "The product needs it." })),
+		assetQueries: [],
+		brief: {
+			pages: ["Home"],
+			features: [],
+			voice: "Warm and plain",
+			content: "Walnut chairs, oak tables, and ash stools.",
+		},
 	};
 }
 
-function builderReturns(repaired: Manifest): void {
-	mocks.buildTask.mockResolvedValue({
-		summary: "Fixed the migration.",
-		manifest: repaired,
-	});
+function json(value: unknown): string {
+	return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-/** The API service in a Blueprint, after a YAML parse. */
-function apiBlock(blueprint: string | undefined) {
-	const services = parse(blueprint ?? "").projects[0].environments[0].services;
-	return services.find(
-		(service: { name: string }) => service.name === "acme-demo-shop-api",
-	);
+/* ── Harness ──────────────────────────────────────────────────────────── */
+
+/** The name of each subtask that ran, and its input, in order. */
+let ran: { name: string; input: unknown }[];
+
+/**
+ * Runs each subtask in this process with the body of its task. As on
+ * Render, the input and the result go through JSON.
+ */
+const tasks: TaskContext = {
+	run: async (task, ...args) => {
+		ran.push({ name: task.name, input: args[0] });
+		return wire(await task.func(tasks, ...wire(args)));
+	},
+};
+
+function wire<T>(value: T): T {
+	return value === undefined ? value : JSON.parse(JSON.stringify(value));
 }
 
-/** The in-memory file system of each fake sandbox. */
+function subtasks(): string[] {
+	return ran.map(({ name }) => name);
+}
+
+/** Overrides the answer of a fake sandbox to one command. */
+type Answer = (command: string) => ExecResult | undefined;
+
 const filesystems = new WeakMap<Sandbox, Map<string, string>>();
 
-/** Specs as `find` in readAllSpecs() lists them: apps/<user>/<app>/factory.json. */
+/** Specs as readAllSpecs() finds them: apps/<user>/<app>/factory.json. */
 const SPEC_PATH = new RegExp(
 	`^${factoryConfig.repoDir}/${factoryConfig.appsDir}/[^/]+/[^/]+/factory\\.json$`,
 );
 
 /**
- * A sandbox with an in-memory file system. It answers the commands of
- * verify(), of the root Blueprint regeneration, and of removeApp(). Other
- * commands succeed.
+ * A sandbox with an in-memory file system. It answers the commands the
+ * pipelines run on files, git, the template script, and the boots and
+ * probes of verify-app, as a healthy app would. Other commands succeed.
  */
-function fakeSandbox(files: Map<string, string>, id = "sbx-clone") {
-	const run = vi.fn(async (command: string): Promise<ExecResult> => {
-		const cat = command.match(/^cat '([^']+)'$/);
-		if (cat) {
-			const contents =
-				files.get(cat[1]) ??
-				(cat[1].endsWith("/index.html") ? STOREFRONT_HTML : undefined);
-			return contents === undefined
-				? { output: "", exitCode: 1 }
-				: { output: contents, exitCode: 0 };
-		}
-		const exists = command.match(/^test -e '([^']+)'$/);
-		if (exists) {
-			return { output: "", exitCode: files.has(exists[1]) ? 0 : 1 };
-		}
-		const remove = command.match(/^rm -rf '([^']+)'$/);
-		if (remove) {
-			for (const path of [...files.keys()]) {
-				if (path.startsWith(`${remove[1]}/`)) files.delete(path);
-			}
-			return { output: "", exitCode: 0 };
-		}
-		if (command.startsWith("find ")) {
-			const specs = [...files.keys()].filter((path) => SPEC_PATH.test(path));
-			return { output: specs.join("\n"), exitCode: 0 };
-		}
-		if (command.startsWith("ls -A ")) {
-			return { output: "api\nweb\n", exitCode: 0 };
-		}
-		return { output: "", exitCode: 0 };
-	});
-
+function fakeSandbox(
+	id: string,
+	files: Map<string, string>,
+	answer: Answer = () => undefined,
+): Sandbox {
+	const run = vi.fn(
+		async (command: string) => answer(command) ?? execute(files, command),
+	);
 	const sandbox = {
 		id,
 		run,
@@ -361,18 +272,88 @@ function fakeSandbox(files: Map<string, string>, id = "sbx-clone") {
 			return result.output;
 		},
 		async readFile(path: string): Promise<string> {
-			const result = await run(`cat '${path}'`);
-			if (result.exitCode !== 0) throw new Error(`Read ${path} failed`);
-			return result.output;
+			return sandbox.mustRun(`cat '${path}'`, `Read ${path}`);
 		},
-		writeFile: vi.fn(async (path: string, contents: string) => {
+		async writeFile(path: string, contents: string): Promise<void> {
 			files.set(path, contents);
-		}),
+		},
+		async upload(path: string, data: unknown): Promise<void> {
+			files.set(path, String(data));
+		},
 		terminate: vi.fn(async () => {}),
-	} as unknown as Sandbox;
-	filesystems.set(sandbox, files);
+	};
+	filesystems.set(sandbox as unknown as Sandbox, files);
+	return sandbox as unknown as Sandbox;
+}
 
-	return { sandbox, run };
+function execute(files: Map<string, string>, command: string): ExecResult {
+	const ok = (output = ""): ExecResult => ({ output, exitCode: 0 });
+	const failed: ExecResult = { output: "", exitCode: 1 };
+	const below = (dir: string) =>
+		[...files.keys()].filter((path) => path.startsWith(`${dir}/`));
+
+	const cat = command.match(/^cat '([^']+)'$/);
+	if (cat) {
+		// A build writes the index.html of a static site.
+		const contents =
+			files.get(cat[1]) ??
+			(cat[1].endsWith("/index.html") ? STOREFRONT_HTML : undefined);
+		return contents === undefined ? failed : ok(contents);
+	}
+	const exists = command.match(/^test -e '([^']+)'$/);
+	if (exists) return files.has(exists[1]) ? ok() : failed;
+	const needs = command.match(/^cd '([^']+)' && test -f (\S+)$/);
+	if (needs) return files.has(`${needs[1]}/${needs[2]}`) ? ok() : failed;
+	const remove = command.match(/^rm -rf '([^']+)'$/);
+	if (remove) {
+		for (const path of below(remove[1])) files.delete(path);
+		return ok();
+	}
+	const list = command.match(/^ls -A '([^']+)'$/);
+	if (list) return ok(below(list[1]).length > 0 ? "web\n" : "");
+	if (command.startsWith("find ")) {
+		return ok(
+			[...files.keys()].filter((path) => SPEC_PATH.test(path)).join("\n"),
+		);
+	}
+	// The template arrives as one script of quoted heredocs.
+	const script = command.match(/^sh '([^']+)'$/);
+	if (script) {
+		const text = files.get(script[1]) ?? "";
+		const dir = text.match(/^cd '([^']+)'$/m)?.[1];
+		for (const file of text.matchAll(
+			/^cat > '([^']+)' <<'FACTORY_TEMPLATE_EOF'\n([\s\S]*?)\nFACTORY_TEMPLATE_EOF$/gm,
+		)) {
+			files.set(`${dir}/${file[1]}`, file[2]);
+		}
+		return ok();
+	}
+	const clean = command.match(/-C '([^']+)' clean -fdXq/);
+	if (clean) {
+		const rules = (files.get(`${clean[1]}/.gitignore`) ?? "")
+			.split("\n")
+			.filter((rule) => rule !== "" && !rule.startsWith("#"));
+		for (const path of below(clean[1])) {
+			const relative = path.slice(clean[1].length + 1);
+			const ignored = rules.some((rule) =>
+				rule.startsWith("/")
+					? relative.startsWith(rule.slice(1))
+					: `/${relative}`.includes(`/${rule}`),
+			);
+			if (ignored) files.delete(path);
+		}
+		return ok();
+	}
+	// As for a first commit: the commit changes every file of the clone.
+	if (command.includes(" diff-tree ")) {
+		return ok(
+			below(factoryConfig.repoDir)
+				.map((path) => `${path.slice(factoryConfig.repoDir.length + 1)}\0`)
+				.join(""),
+		);
+	}
+	if (command.includes("%{http_code}")) return ok('200\n[{"id":1}]');
+	return ok();
 }
 
 function filesystem(sandbox: Sandbox): Map<string, string> {
@@ -381,119 +362,427 @@ function filesystem(sandbox: Sandbox): Map<string, string> {
 	return files;
 }
 
-/** The apps repository, as the sandbox of each push clones it. */
-let files: Map<string, string>;
-let fake: ReturnType<typeof fakeSandbox>;
-/** The sandbox of the run: the agents and verify-app work in it. */
+/** The apps repository, as each push clones it. */
+let repo: Map<string, string>;
+let cloneSandbox: Sandbox;
+/** The files of each pushed commit, in order. */
+let pushes: Map<string, string>[];
+/** The run's sandbox: the agents and verify-app work in it. */
 let buildFiles: Map<string, string>;
-let build: ReturnType<typeof fakeSandbox>;
-/** The checkout at each commit, which is what the push sends to Render. */
-let commits: Map<string, string>[];
+let runSandbox: Sandbox;
 
-// verify-app and publish-app connect to the sandbox of their parent by its id.
-mocks.connectSandbox.mockImplementation((sandboxId: string) => {
-	expect(sandboxId).toBe(build.sandbox.id);
-	return build.sandbox;
+function useRepo(entries: [string, string][]): void {
+	repo = new Map(entries);
+	cloneSandbox = fakeSandbox("sbx-clone", repo);
+	mocks.createSandbox.mockResolvedValue(cloneSandbox);
+}
+
+function useRunSandbox(entries: [string, string][] = [], answer?: Answer) {
+	buildFiles = new Map(entries);
+	runSandbox = fakeSandbox("sbx-build", buildFiles, answer);
+}
+
+/** The builder writes the app into the run's sandbox and describes it. */
+async function builderOutput(manifest: Manifest) {
+	buildFiles.set(APP_SOURCE, STOREFRONT_HTML);
+	return { summary: "A storefront for handmade walnut furniture.", manifest };
+}
+
+function builderReturns(manifest: Manifest): void {
+	mocks.buildTask.mockImplementation(() => builderOutput(manifest));
+}
+
+interface Deploy {
+	id: string;
+	status: string;
+}
+/** Render's deploys of each service, oldest first. */
+let deploys: Map<string, Deploy[]>;
+/** The deploy Render creates for a service while a wait ignores its newest. */
+let nextDeploys: Map<string, Deploy>;
+/** The deploy that each service's last wait ended with. */
+let resultDeploys: Map<string, string>;
+
+/** waitForDeploy() over the fake deploy history, honoring `after`. */
+async function waitForFakeDeploy(
+	serviceId: string,
+	{ after }: { after: string | null },
+): Promise<DeployOutcome> {
+	const history = deploys.get(serviceId) ?? [
+		{ id: `${serviceId}-live`, status: "live" },
+	];
+	deploys.set(serviceId, history);
+	let newest = history[history.length - 1];
+	if (newest.id === after) {
+		const next = nextDeploys.get(serviceId);
+		if (!next) {
+			return {
+				deployId: newest.id,
+				status: newest.status,
+				result: "not_started",
+			};
+		}
+		nextDeploys.delete(serviceId);
+		history.push(next);
+		newest = next;
+	}
+	resultDeploys.set(serviceId, newest.id);
+	return {
+		deployId: newest.id,
+		status: newest.status,
+		result: newest.status === "live" ? "live" : "failed",
+	};
+}
+
+const BLUEPRINT = {
+	id: "exs-test",
+	name: "factory",
+	status: "synced",
+	autoSync: true,
+	repo: "https://github.com/acme/apps",
+	branch: "main",
+	path: "render.yaml",
+};
+
+beforeEach(() => {
+	vi.resetAllMocks();
+	vi.spyOn(console, "log").mockImplementation(() => {});
+	vi.spyOn(console, "warn").mockImplementation(() => {});
+	vi.spyOn(console, "error").mockImplementation(() => {});
+	vi.stubEnv("APPS_REPO", "acme/apps");
+	vi.stubEnv("RENDER_WORKSPACE_ID", "tea-test");
+
+	ran = [];
+	pushes = [];
+	deploys = new Map();
+	nextDeploys = new Map();
+	resultDeploys = new Map();
+	useRepo([]);
+	useRunSandbox();
+
+	mocks.connectSandbox.mockImplementation(() => runSandbox);
+	mocks.readAppFiles.mockImplementation(
+		async (sandbox: Sandbox, appDir: string) => ({
+			files: [...filesystem(sandbox)]
+				.filter(([path]) => path.startsWith(`${appDir}/`))
+				.map(([path, contents]) => ({
+					path: path.slice(appDir.length + 1),
+					data: Buffer.from(contents),
+					executable: false,
+				})),
+		}),
+	);
+	mocks.writeAppFiles.mockImplementation(
+		async (sandbox: Sandbox, appDir: string, copied: AppFile[]) => {
+			const target = filesystem(sandbox);
+			for (const path of [...target.keys()]) {
+				if (path.startsWith(`${appDir}/`)) target.delete(path);
+			}
+			for (const { path, data } of copied) {
+				target.set(`${appDir}/${path}`, data.toString());
+			}
+		},
+	);
+
+	// As git does: no commit when nothing changed since the last one.
+	let head = new Map<string, string>();
+	mocks.commitPaths.mockImplementation(async () => {
+		if (
+			head.size === repo.size &&
+			[...repo].every(([path, contents]) => head.get(path) === contents)
+		) {
+			return null;
+		}
+		head = new Map(repo);
+		return SHA;
+	});
+	mocks.pushVerified.mockImplementation(async () => {
+		pushes.push(new Map(repo));
+		return SHA;
+	});
+	mocks.githubToken.mockResolvedValue("ghs_test");
+	mocks.cloneAppsRepo.mockResolvedValue("https://github.com/acme/apps.git");
+
+	mocks.findBlueprint.mockResolvedValue(BLUEPRINT);
+	mocks.waitForServices.mockImplementation(
+		async (_workspaceId: string, names: string[]) =>
+			new Map(
+				names.map((name) => [
+					name,
+					{ id: `srv-${name}`, name, url: `https://${name}.onrender.com` },
+				]),
+			),
+	);
+	mocks.waitForDeploy.mockImplementation(waitForFakeDeploy);
+	mocks.fetchDeployLogs.mockResolvedValue(
+		'npm error Missing script: "migrate"',
+	);
+	mocks.waitForHttpOk.mockResolvedValue({
+		ok: true,
+		status: 200,
+		body: '[{"id":1}]',
+		headers: new Headers({ "access-control-allow-origin": "*" }),
+	});
+	mocks.pageContains.mockResolvedValue(true);
 });
 
-// The files below the app directory of one fake sandbox go into the app
-// directory of another.
-mocks.readAppFiles.mockImplementation(
-	async (sandbox: Sandbox, appDir: string) => ({
-		files: [...filesystem(sandbox)]
-			.filter(([path]) => path.startsWith(`${appDir}/`))
-			.map(([path, contents]) => ({
-				path: path.slice(appDir.length + 1),
-				data: Buffer.from(contents),
-				executable: false,
-			})),
-	}),
-);
-mocks.writeAppFiles.mockImplementation(
-	async (sandbox: Sandbox, appDir: string, copied: AppFile[]) => {
-		const target = filesystem(sandbox);
-		for (const path of [...target.keys()]) {
-			if (path.startsWith(`${appDir}/`)) target.delete(path);
-		}
-		for (const { path, data } of copied) {
-			target.set(`${appDir}/${path}`, data.toString());
-		}
-	},
-);
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+});
 
-/** The sandbox of the run, with the files of the builder. */
-function newBuild(entries: [string, string][] = []): void {
-	buildFiles = new Map(entries);
-	build = fakeSandbox(buildFiles, "sbx-build");
-}
+/* ── prompt-to-app ────────────────────────────────────────────────────── */
 
-function deploy(context = tasks) {
-	return awaitDeployment({
-		tasks: context,
-		sandbox: build.sandbox,
-		workspaceId: "tea-test",
-		repoUrl: "https://github.com/acme/apps",
-		spec,
-		appDir: APP_DIR,
-		runId: "run-1",
-		summary: "Handmade walnut furniture, sold online.",
-		databaseUrl: null,
-	});
-}
-
-/**
- * The deploy-repair loop. Render deploys from the root Blueprint, and the root
- * Blueprint comes from the factory.json of each app. A repair once passed
- * verification with a new manifest, but the commit kept the old factory.json.
- * Render then used the old commands, and the smoke checks used the old paths.
- */
-describe("awaitDeployment repairs", () => {
+describe("promptToApp", () => {
 	beforeEach(() => {
-		vi.clearAllMocks();
-		process.env.APPS_REPO = "acme/apps";
+		mocks.architectTask.mockResolvedValue(plan("static_site"));
+		builderReturns(siteOnly);
+		// The run's sandbox first, then one for each push.
+		mocks.createSandbox.mockResolvedValueOnce(runSandbox);
+	});
 
-		// What run() published before the first deploy.
-		files = new Map([[APP_SPEC, `${JSON.stringify(spec, null, 2)}\n`]]);
-		fake = fakeSandbox(files);
-		// Each publish clones the apps repository in a sandbox of its own.
-		mocks.createSandbox.mockResolvedValue(fake.sandbox);
-		newBuild([[`${APP_DIR}/web/index.html`, STOREFRONT_HTML]]);
-		commits = [];
+	it("turns a static-site prompt into a deployed app with its URL, and terminates the sandbox", async () => {
+		const result = await promptToApp.func(tasks, INPUT);
 
-		mocks.githubToken.mockResolvedValue("token");
-		mocks.cloneAppsRepo.mockResolvedValue("https://github.com/acme/apps.git");
-		// verify-app and publish-app log a JSON event.
-		vi.spyOn(console, "log").mockImplementation(() => {});
-		mocks.findBlueprint.mockResolvedValue({
-			id: "exs-test",
-			name: "factory",
-			status: "synced",
-			autoSync: true,
-			repo: "https://github.com/acme/apps",
-			branch: "main",
-			path: "render.yaml",
+		expect(result).toMatchObject({
+			status: "deployed",
+			webUrl: expect.stringMatching(/demo-shop-web\.onrender\.com$/),
 		});
-		mocks.waitForServices.mockImplementation(
-			async (_workspaceId: string, names: string[]) =>
-				new Map(
-					names.map((name) => [
-						name,
-						{ id: `srv-${name}`, name, url: `https://${name}.onrender.com` },
-					]),
-				),
+		expect(mocks.finishRun).toHaveBeenCalledWith(
+			"run-1",
+			"deployed",
+			expect.anything(),
+		);
+		expect(subtasks()).toEqual([
+			"architect",
+			"builder",
+			"verify-app",
+			"publish-app",
+		]);
+		expect(pushes).toHaveLength(1);
+		expect(pushes[0].get(APP_SOURCE)).toBe(STOREFRONT_HTML);
+		expect(JSON.parse(pushes[0].get(APP_SPEC) ?? "").manifest).toEqual(
+			siteOnly,
+		);
+		expect(runSandbox.terminate).toHaveBeenCalled();
+	});
+
+	it("starts a plan with a web service from the fullstack template and a sandbox Postgres", async () => {
+		mocks.architectTask.mockResolvedValue(
+			plan("static_site", "web_service", "postgres"),
+		);
+		let startedWith: string[] = [];
+		mocks.buildTask.mockImplementation(() => {
+			startedWith = [...buildFiles.keys()];
+			return builderOutput(fullstack);
+		});
+
+		const result = await promptToApp.func(tasks, INPUT);
+
+		expect(result).toMatchObject({
+			status: "deployed",
+			apiUrl: expect.stringMatching(/demo-shop-api\.onrender\.com$/),
+		});
+		expect(startedWith).toEqual(
+			expect.arrayContaining([
+				`${APP_DIR}/api/package.json`,
+				`${APP_DIR}/web/package.json`,
+			]),
+		);
+		const verified = ran.find(({ name }) => name === "verify-app");
+		expect(verified?.input).toMatchObject({
+			databaseUrl: expect.stringMatching(/^postgres/),
+		});
+	});
+
+	it("sends a verification failure back to the builder and deploys the fixed build", async () => {
+		mocks.buildTask.mockImplementationOnce(() => builderOutput(privateHost));
+
+		const result = await promptToApp.func(tasks, INPUT);
+
+		expect(result.status, result.summary).toBe("deployed");
+		expect(subtasks()).toEqual([
+			"architect",
+			"builder",
+			"verify-app",
+			"builder",
+			"verify-app",
+			"publish-app",
+		]);
+		expect(mocks.buildTask.mock.calls[1][1].message).toMatch(/private network/);
+		expect(pushes).toHaveLength(1);
+		expect(JSON.parse(pushes[0].get(APP_SPEC) ?? "").manifest).toEqual(
+			siteOnly,
+		);
+	});
+
+	it("ends as build_failed, with nothing pushed, when verification still fails after the last fix round", async () => {
+		builderReturns(privateHost);
+
+		const result = await promptToApp.func(tasks, INPUT);
+
+		expect(result.status).toBe("build_failed");
+		expect(result.summary).toMatch(/private network/);
+		expect(subtasks()).toEqual([
+			"architect",
+			"builder",
+			"verify-app",
+			"builder",
+			"verify-app",
+			"builder",
+			"verify-app",
+		]);
+		expect(pushes).toEqual([]);
+		expect(runSandbox.terminate).toHaveBeenCalled();
+	});
+
+	it("fails the run, with no sandbox and no push, when the architect's output fails the schema twice", async () => {
+		mocks.architectTask.mockResolvedValue({ appName: "Not A Slug" });
+
+		await expect(promptToApp.func(tasks, INPUT)).rejects.toThrow(
+			/invalid structured output twice/,
 		);
 
-		// The API fails its first deploy. After that, every deploy is live.
-		const apiDeploys = [FAILED];
-		mocks.waitForDeploy.mockImplementation(
-			async (serviceId: string) =>
-				serviceId === "srv-acme-demo-shop-api"
-					? (apiDeploys.shift() ?? LIVE)
-					: LIVE,
+		expect(mocks.finishRun).toHaveBeenCalledWith("run-1", "failed", {
+			summary: expect.stringMatching(/^architect returned invalid/),
+		});
+		expect(mocks.createSandbox).not.toHaveBeenCalled();
+		expect(pushes).toEqual([]);
+	});
+
+	it("fails the run before any build or push when the app is being deleted or built by another run", async () => {
+		const refusals = [
+			["deleting", /demo\/shop is being deleted/],
+			["running", /different run is building demo\/shop/],
+		] as const;
+		for (const [reason, summary] of refusals) {
+			mocks.claimRunApp.mockResolvedValueOnce({ claimed: false, reason });
+
+			const result = await promptToApp.func(tasks, INPUT);
+
+			expect(result.status).toBe("failed");
+			expect(result.summary).toMatch(summary);
+		}
+		expect(mocks.createSandbox).not.toHaveBeenCalled();
+		expect(mocks.buildTask).not.toHaveBeenCalled();
+		expect(pushes).toEqual([]);
+	});
+
+	it("ends as awaiting_blueprint after the push when no Blueprint watches the apps repository", async () => {
+		mocks.findBlueprint.mockResolvedValue(null);
+
+		const result = await promptToApp.func(tasks, INPUT);
+
+		expect(result.status).toBe("awaiting_blueprint");
+		expect(result.summary).toMatch(/no Blueprint .* is watching/);
+		expect(pushes).toHaveLength(1);
+		expect(mocks.waitForServices).not.toHaveBeenCalled();
+	});
+
+	// The builder can run any command in the run's sandbox and leave a
+	// process there, so no credential and no clone may ever enter it.
+	it("keeps the GitHub token out of the run's sandbox and pushes only the app's directory and the root Blueprint from a separate clone", async () => {
+		const token = "ghs_push_token";
+		mocks.githubToken.mockResolvedValue(token);
+		const victimDir = appPath("victim", "site");
+		useRepo([
+			[
+				`${victimDir}/factory.json`,
+				json({ ...spec, user: "victim", appName: "site" }),
+			],
+			[`${victimDir}/index.html`, STOREFRONT_HTML],
+		]);
+		const before = new Map(repo);
+		mocks.buildTask.mockImplementation(() => {
+			buildFiles.set(APP_SPEC, json({ ...spec, appName: "evil" }));
+			buildFiles.set(`${victimDir}/index.html`, "defaced");
+			return builderOutput(siteOnly);
+		});
+
+		await promptToApp.func(tasks, INPUT);
+
+		const commands = vi.mocked(runSandbox.run).mock.calls.join("\n");
+		expect(commands).not.toMatch(/ghs_|clone|remote/);
+		expect(JSON.stringify([...buildFiles])).not.toContain(token);
+		expect(JSON.stringify(ran)).not.toContain(token);
+		expect(mocks.cloneAppsRepo.mock.calls.map(([sandbox]) => sandbox)).toEqual([
+			cloneSandbox,
+		]);
+		expect(mocks.pushVerified).toHaveBeenCalledWith(
+			cloneSandbox,
+			token,
+			expect.any(String),
+			factoryConfig.branch,
+			["apps/demo/shop", factoryConfig.blueprintPath],
+			expect.any(Function),
 		);
-		mocks.fetchDeployLogs.mockResolvedValue("");
+
+		const [commit] = pushes;
+		const changed = [...commit.keys()].filter(
+			(path) => commit.get(path) !== before.get(path),
+		);
+		expect(
+			changed.filter(
+				(path) => path !== ROOT_BLUEPRINT && !path.startsWith(`${APP_DIR}/`),
+			),
+		).toEqual([]);
+		expect(commit.get(`${victimDir}/index.html`)).toBe(STOREFRONT_HTML);
+		expect(JSON.parse(commit.get(APP_SPEC) ?? "")).toMatchObject({
+			user: "demo",
+			appName: "shop",
+			manifest: siteOnly,
+		});
+		expect(commit.get(ROOT_BLUEPRINT)).not.toMatch(/demo-evil/);
+	});
+});
+
+/* ── The deploy stage ─────────────────────────────────────────────────── */
+
+describe("awaitDeployment", () => {
+	/** A repair that changes only how the API migrates. */
+	const repair: Manifest = {
+		...fullstack,
+		services: [
+			fullstack.services[0],
+			{ ...api, preDeployCommand: "npm run db:migrate" },
+		],
+	};
+
+	/** The deploy stage after the first push of the shop app. */
+	function deploy(
+		push: Partial<
+			Pick<DeployContext, "deploysBefore" | "changedServices">
+		> = {},
+	) {
+		return awaitDeployment({
+			tasks,
+			sandbox: runSandbox,
+			workspaceId: "tea-test",
+			repoUrl: "https://github.com/acme/apps",
+			spec,
+			appDir: APP_DIR,
+			runId: "run-1",
+			summary: "Handmade walnut furniture, sold online.",
+			databaseUrl: null,
+			deploysBefore: new Map(),
+			changedServices: ["web", "api"],
+			...push,
+		});
+	}
+
+	/** The API's first deploy fails its pre-deploy command. */
+	function apiDeployFails(): void {
+		deploys.set(API_ID, [{ id: "dep-api1", status: "pre_deploy_failed" }]);
+	}
+
+	beforeEach(() => {
+		useRepo([[APP_SPEC, json(spec)]]);
+		useRunSandbox([
+			[APP_SOURCE, STOREFRONT_HTML],
+			[`${APP_DIR}/api/src/index.ts`, "export {};"],
+		]);
+		builderReturns(repair);
 		mocks.deployManagerTask.mockResolvedValue({
-			allHealthy: false,
 			failures: [
 				{
 					serviceName: "acme-demo-shop-api",
@@ -502,882 +791,256 @@ describe("awaitDeployment repairs", () => {
 				},
 			],
 		});
-		mocks.waitForHttpOk.mockResolvedValue({
-			ok: true,
-			status: 200,
-			body: '[{"id":1}]',
-			headers: new Headers({ "access-control-allow-origin": "*" }),
-		});
-		mocks.pageContains.mockResolvedValue(true);
-
-		mocks.commitPaths.mockImplementation(async () => {
-			commits.push(new Map(files));
-			return "b".repeat(40);
-		});
-		mocks.pushVerified.mockResolvedValue("b".repeat(40));
 	});
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
+	it("diagnoses a failed deploy, repairs it through verify-app and publish-app, and ends deployed when the new deploy is live", async () => {
+		apiDeployFails();
+		nextDeploys.set(API_ID, { id: "dep-api2", status: "live" });
+		mocks.fetchDeployLogs.mockResolvedValue(
+			"DATABASE_URL=postgres://shop:s3cret@dpg-shop-a/shop\nnpm error Missing script",
+		);
 
-	// On Render, each subtask has its own run, with its own logs.
-	it("verifies and publishes the repair in subtasks", async () => {
-		builderReturns(repair);
-		const { context, runs } = recordSubtasks();
+		const result = await deploy();
 
-		await deploy(context);
-
-		expect(runs.map(({ name }) => name)).toEqual([
+		expect(result.status, result.summary).toBe("deployed");
+		expect(subtasks()).toEqual([
 			"deploy-manager",
 			"builder",
 			"verify-app",
 			"publish-app",
 		]);
-		expect(runs[3].input).toMatchObject({
-			sandboxId: build.sandbox.id,
-			message: "Fix Render deploy for demo/shop (round 1)",
+		// The Dashboard shows every task input, so the logs arrive redacted.
+		const diagnosed = JSON.stringify(ran[0].input);
+		expect(diagnosed).toContain("npm error Missing script");
+		expect(diagnosed).toContain("[REDACTED]");
+		expect(diagnosed).not.toContain("s3cret");
+		expect(pushes).toHaveLength(1);
+		expect(JSON.parse(pushes[0].get(APP_SPEC) ?? "")).toEqual({
+			...spec,
+			manifest: repair,
 		});
-		expect(logged("log")).toEqual([
-			{ event: "app_verified", user: "demo", appName: "shop" },
-			{
-				event: "app_published",
-				user: "demo",
-				appName: "shop",
-				commit: "b".repeat(40),
-			},
-		]);
 	});
 
-	// The Render Dashboard shows each task input, and logs can hold secrets. A
-	// cut before the redaction would keep the end of the connection string.
-	it("gives the deploy manager the last lines of the logs, without secrets", async () => {
-		builderReturns(repair);
-		mocks.fetchDeployLogs.mockResolvedValue(
-			[
-				...Array.from(
-					{ length: 1_000 },
-					() => "npm warn deprecated glob@7.2.3",
-				),
-				`DATABASE_URL=postgres://shop:${"x".repeat(50_000)}@dpg-shop-a/shop`,
-				'npm error Missing script: "migrate"',
-			].join("\n"),
-		);
-		const { context, runs } = recordSubtasks();
+	it("ends deploy_failed without smoke tests when the deploy manager diagnoses no failure", async () => {
+		apiDeployFails();
+		mocks.deployManagerTask.mockResolvedValue({ failures: [] });
 
-		await deploy(context);
+		const result = await deploy();
 
-		const { message } = runs[0].input as { message: string };
-		expect(message).toContain(
-			'DATABASE_URL=[REDACTED]\nnpm error Missing script: "migrate"',
-		);
-		expect(message).not.toContain("dpg-shop-a");
-		expect(message.length).toBeLessThan(10_000);
+		expect(result.status).toBe("deploy_failed");
+		expect(result.summary).toMatch(/diagnosed no failure/);
+		expect(mocks.buildTask).not.toHaveBeenCalled();
+		expect(pushes).toEqual([]);
+		expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
 	});
 
-	it("pushes nothing when the repair fails verification", async () => {
+	it("pushes nothing and ends deploy_failed when a repair adds a resource", async () => {
+		apiDeployFails();
 		builderReturns({
-			...manifest,
-			services: manifest.services.map((service) =>
-				service.name === "web"
-					? {
-							...service,
-							envVars: [
-								{
-									key: "VITE_API_HOST",
-									fromService: { name: "api", property: "host" },
-								},
-							],
-						}
-					: service,
-			),
+			...repair,
+			services: [
+				...repair.services,
+				{ ...api, name: "search", rootDir: "search" },
+			],
 		});
 
 		const result = await deploy();
 
 		expect(result.status).toBe("deploy_failed");
-		expect(result.summary).toContain(
-			"Deploy repair round 1 failed local verification: web: envVar VITE_API_HOST uses fromService property host.",
-		);
-		expect(mocks.commitPaths).not.toHaveBeenCalled();
-		expect(mocks.pushVerified).not.toHaveBeenCalled();
+		expect(result.summary).toMatch(/was not pushed\. The repair adds/);
+		expect(pushes).toEqual([]);
 	});
 
-	it("commits the repaired manifest in factory.json and both Blueprints", async () => {
-		builderReturns(repair);
+	it("ends deploy_failed when the repair push starts no new deploy, even though an old deploy is live", async () => {
+		apiDeployFails();
 
 		const result = await deploy();
+
+		expect(result.status).toBe("deploy_failed");
+		expect(result.summary).toMatch(/repair push did not start a new deploy/);
+		expect(pushes).toHaveLength(1);
+		expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
+	});
+
+	it("on a rebuild, waits past the pre-push deploy of each changed service and keeps the live deploy of an unchanged one", async () => {
+		deploys.set(WEB_ID, [{ id: "dep-web0", status: "live" }]);
+		deploys.set(API_ID, [{ id: "dep-api0", status: "live" }]);
+		nextDeploys.set(API_ID, { id: "dep-api1", status: "live" });
+
+		const result = await deploy({
+			deploysBefore: new Map([
+				["acme-demo-shop-web", "dep-web0"],
+				["acme-demo-shop-api", "dep-api0"],
+			]),
+			changedServices: ["api"],
+		});
 
 		expect(result.status, result.summary).toBe("deployed");
-		expect(commits).toHaveLength(1);
-		const [commit] = commits;
-		expect(JSON.parse(commit.get(APP_SPEC) ?? "")).toEqual({
-			...spec,
-			manifest: repair,
-		});
-		for (const blueprint of [APP_BLUEPRINT, ROOT_BLUEPRINT]) {
-			expect(apiBlock(commit.get(blueprint))).toMatchObject({
-				preDeployCommand: "npm run db:migrate",
-			});
-		}
-		// The files of the repaired app come from the sandbox of the run.
-		expect(commit.get(`${APP_DIR}/web/index.html`)).toBe(STOREFRONT_HTML);
-		expect(mocks.readAppFiles).toHaveBeenLastCalledWith(build.sandbox, APP_DIR);
-	});
-
-	it("smoke-tests the paths of the repaired manifest", async () => {
-		builderReturns(repair);
-
-		await deploy();
-
-		const urls = mocks.waitForHttpOk.mock.calls.map(([url]) => url);
-		expect(urls).toContain(`${API_URL}/api/products`);
-		expect(urls).not.toContain(`${API_URL}/api/items`);
-	});
-
-	// A concurrent push makes the rebase regenerate the root Blueprint from
-	// each factory.json, so the rewritten one must be what it reads.
-	// When another run pushes first, the clone takes the new tip, and the
-	// change of the repair runs again on it.
-	it("makes the repair again on the new tip", async () => {
-		builderReturns(repair);
-		await deploy();
-
-		const redo = mocks.pushVerified.mock.calls[0][5];
-		// The new tip, as the other run left it: its own app, and a root
-		// Blueprint without the repair.
-		files.set(CAFE_SPEC, json(cafe));
-		files.set(ROOT_BLUEPRINT, rootBlueprint([cafe]));
-		await expect(redo()).resolves.toBe("b".repeat(40));
-
-		const services = parse(files.get(ROOT_BLUEPRINT) ?? "").projects.flatMap(
-			(project: { environments: { services: { name: string }[] }[] }) =>
-				project.environments[0].services,
-		);
-		expect(
-			services.find(
-				(service: { name: string }) => service.name === "acme-demo-shop-api",
-			),
-		).toMatchObject({ preDeployCommand: "npm run db:migrate" });
-		expect(services.map((service: { name: string }) => service.name)).toContain(
-			"acme-demo-cafe-web",
-		);
-	});
-
-	it.each<{ change: string; repaired: Manifest; message: string }>([
-		{
-			change: "adds a service",
-			repaired: {
-				...manifest,
-				services: [
-					...manifest.services,
-					{
-						name: "search",
-						kind: "web_service",
-						rootDir: "search",
-						runtime: "node",
-						buildCommand: "npm ci",
-						startCommand: "npm start",
-					},
-				],
-			},
-			message: "The repair adds acme-demo-shop-search (node).",
-		},
-		{
-			change: "removes the database",
-			repaired: { services: manifest.services },
-			message: "The repair removes acme-demo-shop-db (postgres).",
-		},
-		// The name stays the same, but Render cannot change the runtime.
-		{
-			change: "changes the kind of a service",
-			repaired: withApi({ kind: "static_site", staticPublishPath: "dist" }),
-			message:
-				"The repair adds acme-demo-shop-api (static) and removes acme-demo-shop-api (node).",
-		},
-	])(
-		"pushes nothing when the repair $change",
-		async ({ repaired, message }) => {
-			builderReturns(repaired);
-
-			const result = await deploy();
-
-			expect(result.status).toBe("deploy_failed");
-			expect(result.summary).toContain(message);
-			expect(mocks.commitPaths).not.toHaveBeenCalled();
-			expect(mocks.pushVerified).not.toHaveBeenCalled();
-			expect(JSON.parse(files.get(APP_SPEC) ?? "").manifest).toEqual(manifest);
-		},
-	);
-
-	/**
-	 * Right after a repair push, the newest deploy of the failed service is
-	 * still the failed deploy: Render creates the new deploy only after the
-	 * GitHub webhook and the Blueprint sync. The loop once took that failed
-	 * deploy as the result of the repair. It then repaired again, and at the
-	 * end it reported a status from before the repair.
-	 *
-	 * These tests use the real waitForDeploy(). A fake Render API gives the
-	 * result of each poll of the deploys of a service.
-	 */
-	describe("after a repair push", () => {
-		const WEB_ID = "srv-acme-demo-shop-web";
-		const API_ID = "srv-acme-demo-shop-api";
-		const LIVE_WEB = { id: "dep-web1", status: "live" };
-		const FAILED_API = { id: "dep-api1", status: "pre_deploy_failed" };
-
-		beforeEach(async () => {
-			const render =
-				await vi.importActual<typeof import("../app/render.js")>(
-					"../app/render.js",
-				);
-			mocks.waitForDeploy.mockImplementation(render.waitForDeploy);
-			vi.useFakeTimers();
-			vi.stubEnv("RENDER_API_KEY", "rnd_test");
-			vi.spyOn(console, "warn").mockImplementation(() => {});
-		});
-
-		afterEach(() => {
-			vi.useRealTimers();
-			vi.unstubAllGlobals();
-			vi.unstubAllEnvs();
-			vi.mocked(console.warn).mockRestore();
-		});
-
-		/**
-		 * Each poll of the deploys of a service gets the next deploy in its
-		 * script, or the next error status. After the last one, each poll gets
-		 * the last one again. Returns the number of polls of each service.
-		 */
-		function fakeRender(
-			scripts: Record<string, ({ id: string; status: string } | number)[]>,
-		): Map<string, number> {
-			const polls = new Map<string, number>();
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async (url: string | URL | Request) => {
-					const path = new URL(String(url)).pathname;
-					const serviceId = path.match(/^\/v1\/services\/([^/]+)\/deploys$/)?.[1];
-					const script = serviceId ? scripts[serviceId] : undefined;
-					if (!serviceId || !script) {
-						throw new Error(`Unexpected request to ${url}`);
-					}
-					const poll = polls.get(serviceId) ?? 0;
-					polls.set(serviceId, poll + 1);
-					const result = script[Math.min(poll, script.length - 1)];
-					return typeof result === "number"
-						? new Response("", { status: result })
-						: Response.json([{ deploy: result, cursor: "c" }]);
-				}),
-			);
-			return polls;
-		}
-
-		/** Deploy, and run the sleeps between the polls at once. */
-		async function deployOn() {
-			const [result] = await Promise.all([deploy(), vi.runAllTimersAsync()]);
-			return result;
-		}
-
-		/** The deploy status that the deploy manager got in each round. */
-		function diagnosedStatuses(): string[] {
-			return mocks.deployManagerTask.mock.calls.map(
-				([, input]) => input.message.match(/deploy status "([^"]+)"/)?.[1],
-			);
-		}
-
-		it("waits past the failed deploy that is still the newest", async () => {
-			builderReturns(repair);
-			const polls = fakeRender({
-				[WEB_ID]: [LIVE_WEB],
-				[API_ID]: [
-					FAILED_API,
-					// The first poll after the push. Render has not created the
-					// deploy of the repair yet.
-					FAILED_API,
-					{ id: "dep-api2", status: "build_in_progress" },
-					{ id: "dep-api2", status: "live" },
-				],
-			});
-
-			const result = await deployOn();
-
-			expect(result.status, result.summary).toBe("deployed");
-			expect(mocks.buildTask).toHaveBeenCalledTimes(1);
-			expect(mocks.pushVerified).toHaveBeenCalledTimes(1);
-			expect(polls.get(API_ID)).toBe(4);
-			// The storefront was live, and the repair did not change it.
-			expect(polls.get(WEB_ID)).toBe(1);
-		});
-
-		// The run pushed, and Render deploys the push. A poll that fails once
-		// must not end the run.
-		it("continues to wait when a poll fails after the repair push", async () => {
-			builderReturns(repair);
-			const polls = fakeRender({
-				[WEB_ID]: [LIVE_WEB],
-				[API_ID]: [
-					FAILED_API,
-					502,
-					{ id: "dep-api2", status: "live" },
-				],
-			});
-
-			const result = await deployOn();
-
-			expect(result.status, result.summary).toBe("deployed");
-			expect(mocks.pushVerified).toHaveBeenCalledTimes(1);
-			expect(polls.get(API_ID)).toBe(3);
-		});
-
-		it("reports the status of the deploy of the last repair", async () => {
-			builderReturns(repair);
-			fakeRender({
-				[WEB_ID]: [LIVE_WEB],
-				[API_ID]: [
-					FAILED_API,
-					FAILED_API,
-					{ id: "dep-api2", status: "build_failed" },
-					{ id: "dep-api2", status: "build_failed" },
-					{ id: "dep-api3", status: "update_failed" },
-				],
-			});
-
-			const result = await deployOn();
-
-			expect(result).toEqual({
-				status: "deploy_failed",
-				summary: 'acme-demo-shop-api ended as "update_failed".',
-			});
-			expect(mocks.pushVerified).toHaveBeenCalledTimes(2);
-			expect(diagnosedStatuses()).toEqual([
-				"pre_deploy_failed",
-				"build_failed",
-			]);
-			// Each round reads the logs of the deploy that failed in that round.
-			expect(
-				mocks.fetchDeployLogs.mock.calls.map(
-					([serviceId, deployId]) => `${serviceId} ${deployId}`,
-				),
-			).toEqual([`${API_ID} dep-api1`, `${API_ID} dep-api2`]);
-		});
-
-		it("reports a repair push that started no new deploy", async () => {
-			builderReturns(repair);
-			fakeRender({
-				[WEB_ID]: [LIVE_WEB],
-				[API_ID]: [FAILED_API],
-			});
-
-			const result = await deployOn();
-
-			expect(result).toEqual({
-				status: "deploy_failed",
-				summary:
-					"acme-demo-shop-api: the repair push did not start a new deploy in 15 minutes. " +
-					'The newest deploy is still dep-api1 ("pre_deploy_failed"). ' +
-					"Render deploys a service again when a commit changes files in its rootDir or its entry in the Blueprint.",
-			});
-			// Another round diagnoses the same failed deploy, so none starts.
-			expect(mocks.deployManagerTask).toHaveBeenCalledTimes(1);
-			expect(mocks.buildTask).toHaveBeenCalledTimes(1);
-			expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
-		});
-
-		// Render keeps the last live deploy of a failed service. The smoke
-		// checks must not test that deploy as if it were the repair.
-		it("fails when the repair changes no files", async () => {
-			builderReturns(manifest);
-			mocks.commitPaths.mockResolvedValue(null);
-			fakeRender({
-				[WEB_ID]: [LIVE_WEB],
-				[API_ID]: [FAILED_API],
-			});
-
-			const result = await deployOn();
-
-			expect(result).toEqual({
-				status: "deploy_failed",
-				summary:
-					"Deploy repair round 1 changed no files, so Render has no new commit to deploy. " +
-					'acme-demo-shop-api ended as "pre_deploy_failed".',
-			});
-			expect(mocks.pushVerified).not.toHaveBeenCalled();
-			expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
+		expect(Object.fromEntries(resultDeploys)).toEqual({
+			[WEB_ID]: "dep-web0",
+			[API_ID]: "dep-api1",
 		});
 	});
-});
 
-/**
- * awaiting_blueprint tells the user to create a Blueprint. A lookup error once
- * gave that status, although a Blueprint watched the repository.
- */
-describe("awaitDeployment Blueprint lookup", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		files = new Map([[APP_SPEC, `${JSON.stringify(spec, null, 2)}\n`]]);
-		fake = fakeSandbox(files);
-		newBuild();
-	});
+	it("ends deploy_failed when a browser could not use the live app: no API hostname in the storefront, or no CORS header for its origin", async () => {
+		mocks.pageContains.mockResolvedValue(false);
 
-	it("gives awaiting_blueprint when no Blueprint watches the path", async () => {
-		mocks.findBlueprint.mockResolvedValue(null);
+		const noHost = await deploy();
 
-		const result = await deploy();
+		expect(noHost.status).toBe("deploy_failed");
+		expect(noHost.summary).toMatch(/does not contain the API hostname/);
 
-		expect(result.status).toBe("awaiting_blueprint");
-		expect(result.summary).toContain(
-			"no Blueprint in workspace tea-test is watching render.yaml",
-		);
-		expect(mocks.waitForServices).not.toHaveBeenCalled();
-	});
-
-	it("ends the run with the error when the lookup fails", async () => {
-		const error = new Error(
-			"The Blueprint lookup failed 5 times in sequence. " +
-				"The last error: Listing Blueprints failed with 503.",
-		);
-		mocks.findBlueprint.mockRejectedValue(error);
-
-		await expect(deploy()).rejects.toBe(error);
-		expect(mocks.waitForServices).not.toHaveBeenCalled();
-	});
-});
-
-/**
- * Render can route a new hostname some minutes after its first deploy is
- * live. A run once ended as deploy_failed, because its site gave 404 for the
- * 3 minutes of the check, and the site was live.
- */
-describe("awaitDeployment smoke checks", () => {
-	const WEB_URL = "https://acme-demo-shop-web.onrender.com";
-
-	beforeEach(() => {
-		vi.clearAllMocks();
-		newBuild();
-		mocks.findBlueprint.mockResolvedValue({
-			id: "exs-test",
-			name: "factory",
-			status: "synced",
-			autoSync: true,
-			repo: "https://github.com/acme/apps",
-			branch: "main",
-			path: "render.yaml",
-		});
-		mocks.waitForServices.mockImplementation(
-			async (_workspaceId: string, names: string[]) =>
-				new Map(
-					names.map((name) => [
-						name,
-						{ id: `srv-${name}`, name, url: `https://${name}.onrender.com` },
-					]),
-				),
-		);
-		mocks.waitForDeploy.mockResolvedValue(LIVE);
+		mocks.pageContains.mockResolvedValue(true);
 		mocks.waitForHttpOk.mockResolvedValue({
 			ok: true,
 			status: 200,
 			body: '[{"id":1}]',
-			headers: new Headers({ "access-control-allow-origin": "*" }),
-		});
-		mocks.pageContains.mockResolvedValue(true);
-	});
-
-	it("waits longer for the first answer of each hostname than for the data", async () => {
-		const result = await deploy();
-
-		expect(result.status, result.summary).toBe("deployed");
-		expect(
-			mocks.waitForHttpOk.mock.calls.map(([url, timeoutMs]) => [
-				url,
-				timeoutMs / 60_000,
-			]),
-		).toEqual([
-			[WEB_URL, 10],
-			[`${API_URL}/health`, 10],
-			[`${API_URL}/api/items`, 3],
-		]);
-	});
-
-	it("tells how long it waited for a site that did not answer", async () => {
-		mocks.waitForHttpOk.mockResolvedValueOnce({
-			ok: false,
-			status: 404,
-			body: "",
 			headers: new Headers(),
 		});
 
-		const result = await deploy();
+		const noCors = await deploy();
 
-		expect(result).toEqual({
-			status: "deploy_failed",
-			summary: `${WEB_URL} did not return a successful response in 10 minutes (last status 404).`,
-		});
+		expect(noCors.status).toBe("deploy_failed");
+		expect(noCors.summary).toMatch(/no access-control-allow-origin header/);
 	});
 });
 
-/* ── Delete ───────────────────────────────────────────────────────────── */
+/* ── verify-app ───────────────────────────────────────────────────────── */
 
-const APP_SOURCE = `${APP_DIR}/web/index.html`;
-const cafe: AppSpec = { ...spec, appName: "cafe", prompt: "A menu for a cafe" };
-const CAFE_SPEC = `${appPath("demo", "cafe")}/factory.json`;
-const SHOP_RESOURCES = [
-	"acme-demo-shop-web",
-	"acme-demo-shop-api",
-	"acme-demo-shop-db",
-];
+describe("verifyAppTask", () => {
+	const DATABASE_URL = "postgres://app:app@127.0.0.1:5432/appdb";
 
-function json(value: unknown): string {
-	return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function sameFiles(a: Map<string, string>, b: Map<string, string>): boolean {
-	return (
-		a.size === b.size &&
-		[...a].every(([path, contents]) => b.get(path) === contents)
-	);
-}
-
-/** What the gateway gives delete-app for the shop app. */
-const SHOP_APP = { user: "demo", appName: "shop" };
-
-/** The JSON events that the delete writes with one console method, in order. */
-function logged(method: "log" | "warn" | "error"): Record<string, unknown>[] {
-	return vi
-		.mocked(console[method])
-		.mock.calls.flatMap(([line]) =>
-			typeof line === "string" && line.startsWith("{")
-				? [JSON.parse(line)]
-				: [],
-		);
-}
-
-/**
- * A Blueprint sync recreates a declared resource that is missing, and it
- * never deletes a resource. So the order is the contract: the app leaves the
- * Blueprint, the syncs of earlier commits finish, then Render deletes its
- * resources, then its files go.
- */
-describe("removeApp", () => {
-	/** Each commit, push, wait, and Render delete, in order. */
-	let steps: string[];
-	/** The files of the last commit. */
-	let head: Map<string, string>;
-
-	/** The apps repository as the sandbox of each step clones it. */
-	function clone(entries: [string, string][]): void {
-		files = new Map(entries);
-		fake = fakeSandbox(files);
-		head = new Map(files);
-		mocks.createSandbox.mockResolvedValue(fake.sandbox);
+	function verify(manifest: Manifest, databaseUrl: string | null = null) {
+		return verifyAppTask.func(tasks, {
+			sandboxId: runSandbox.id,
+			user: "demo",
+			appName: "shop",
+			manifest,
+			databaseUrl,
+		});
 	}
 
+	const apiOnly: Manifest = { services: [api], databases: [{ name: "db" }] };
+	const apiSource: [string, string][] = [
+		[`${APP_DIR}/api/src/index.ts`, "export {};"],
+	];
+
+	it("fails a web service whose health check needs the database, or whose data endpoint returns no rows", async () => {
+		useRunSandbox(apiSource, (command) =>
+			command.includes("nohup") && command.includes("postgres://unreachable/db")
+				? { output: "Error: connect ECONNREFUSED", exitCode: 1 }
+				: undefined,
+		);
+		const needsDatabase = await verify(apiOnly, DATABASE_URL);
+
+		useRunSandbox(apiSource, (command) =>
+			command.includes("%{http_code}")
+				? { output: "200\n[]", exitCode: 0 }
+				: undefined,
+		);
+		const noRows = await verify(apiOnly, DATABASE_URL);
+
+		expect(needsDatabase.failures).toEqual([
+			expect.stringMatching(/\/health did not answer .* unreachable database/),
+		]);
+		expect(noRows.failures).toEqual([
+			expect.stringMatching(/\/api\/items returned 200 but no data/),
+		]);
+	});
+
+	it("fails a static site that takes a private-network property from another service", async () => {
+		useRunSandbox([[APP_SOURCE, STOREFRONT_HTML]]);
+
+		const { failures } = await verify(privateHost);
+
+		expect(failures).toEqual([
+			expect.stringMatching(/VITE_API_HOST .*private network/),
+		]);
+	});
+
+	it("removes the files the app's .gitignore ignores before the build, so a build that needs one fails", async () => {
+		useRunSandbox([
+			[APP_SOURCE, STOREFRONT_HTML],
+			[`${APP_DIR}/web/node_modules/.bin/vite`, "#!/bin/sh"],
+		]);
+
+		const { failures } = await verify({
+			services: [
+				{ ...storefront, buildCommand: "test -f node_modules/.bin/vite" },
+			],
+		});
+
+		expect(failures).toEqual([
+			expect.stringMatching(/^web \(web\) build failed/),
+		]);
+		expect([...buildFiles.keys()]).toEqual([
+			APP_SOURCE,
+			`${APP_DIR}/.gitignore`,
+		]);
+	});
+});
+
+/* ── delete-app ───────────────────────────────────────────────────────── */
+
+describe("deleteApp", () => {
+	const SHOP_RESOURCES = [
+		"acme-demo-shop-web",
+		"acme-demo-shop-api",
+		"acme-demo-shop-db",
+	];
+
 	beforeEach(() => {
-		vi.clearAllMocks();
-		vi.spyOn(console, "log").mockImplementation(() => {});
-		vi.spyOn(console, "warn").mockImplementation(() => {});
-		process.env.APPS_REPO = "acme/apps";
-		process.env.RENDER_WORKSPACE_ID = "tea-test";
-		steps = [];
-		commits = [];
-		clone([
+		useRepo([
 			[APP_SPEC, json(spec)],
 			[APP_SOURCE, STOREFRONT_HTML],
 			[CAFE_SPEC, json(cafe)],
 		]);
-		mocks.githubToken.mockResolvedValue("token");
-		mocks.cloneAppsRepo.mockResolvedValue("https://github.com/acme/apps.git");
-
-		// As git does, make no commit when nothing changed.
-		mocks.commitPaths.mockImplementation(async () => {
-			if (sameFiles(files, head)) return null;
-			head = new Map(files);
-			commits.push(head);
-			steps.push("commit");
-			return "c".repeat(40);
-		});
-		mocks.pushVerified.mockImplementation(async () => {
-			steps.push("push");
-			return "c".repeat(40);
-		});
-		mocks.findBlueprint.mockResolvedValue({
-			id: "exs-test",
-			name: "factory",
-			status: "in_sync",
-			autoSync: true,
-			repo: "https://github.com/acme/apps",
-			branch: "main",
-			path: "render.yaml",
-		});
-		mocks.waitForBlueprintSyncs.mockImplementation(async () => {
-			steps.push("wait for syncs");
-		});
-		mocks.deleteAppResources.mockImplementation(async () => {
-			steps.push("delete resources");
-			return SHOP_RESOURCES;
-		});
+		mocks.deleteAppResources.mockResolvedValue(SHOP_RESOURCES);
 	});
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
+	it("removes the app from the Blueprint, waits for syncs, deletes its resources, then removes its files and its runs", async () => {
+		const result = await deleteApp.func(tasks, SHOP_APP);
 
-	it("deletes the resources after the app leaves the Blueprint and the syncs finish, and the files last", async () => {
-		await expect(removeApp(tasks, SHOP_APP)).resolves.toEqual(SHOP_RESOURCES);
-
-		expect(steps).toEqual([
-			"commit",
-			"push",
-			"wait for syncs",
-			"delete resources",
-			"commit",
-			"push",
-		]);
-		const [leave, removal] = commits;
-
-		// A commit that removed the source would start a build of each service.
-		expect(leave.get(APP_SOURCE)).toBe(STOREFRONT_HTML);
-		expect(JSON.parse(leave.get(APP_SPEC) ?? "")).toEqual({
-			...spec,
-			deletedAt: expect.any(String),
+		expect(result).toMatchObject({
+			status: "deleted",
+			deleted: SHOP_RESOURCES,
 		});
-		const root = leave.get(ROOT_BLUEPRINT) ?? "";
-		expect(root).not.toContain("acme-demo-shop");
-		expect(root).toContain("acme-demo-cafe-web");
-
-		expect(
-			[...removal.keys()].filter((path) => path.startsWith(`${APP_DIR}/`)),
-		).toEqual([]);
-		expect(removal.get(CAFE_SPEC)).toBe(json(cafe));
-	});
-
-	// On Render, each step then has its own run, with its own logs.
-	it("runs each step as a subtask", async () => {
-		const { context, runs } = recordSubtasks();
-		await removeApp(context, SHOP_APP);
-
-		expect(runs.map(({ name }) => name)).toEqual([
+		expect(subtasks()).toEqual([
 			"remove-app-from-blueprint",
 			"wait-for-blueprint-syncs",
 			"delete-app-resources",
 			"remove-app-files",
 		]);
+		const [leave, removal] = pushes;
+		// A commit that removed the source would start a build of each service.
+		expect(leave.get(APP_SOURCE)).toBe(STOREFRONT_HTML);
+		expect(leave.get(ROOT_BLUEPRINT)).not.toMatch(/acme-demo-shop/);
+		expect(leave.get(ROOT_BLUEPRINT)).toMatch(/acme-demo-cafe-web/);
+		expect(
+			[...removal.keys()].filter((path) => path.startsWith(`${APP_DIR}/`)),
+		).toEqual([]);
+		expect(removal.get(CAFE_SPEC)).toBe(json(cafe));
+		expect(mocks.deleteRuns).toHaveBeenCalledWith("demo", "shop");
 	});
 
-	it("waits for the syncs of the Blueprint that watches the apps repository", async () => {
-		await removeApp(tasks, SHOP_APP);
-
-		expect(mocks.findBlueprint).toHaveBeenCalledWith({
-			workspaceId: "tea-test",
-			repo: "https://github.com/acme/apps",
-			branch: factoryConfig.branch,
-			path: factoryConfig.blueprintPath,
-		});
-		expect(mocks.waitForBlueprintSyncs).toHaveBeenCalledWith(
-			"exs-test",
-			expect.objectContaining({
-				// The wait gives Render time to receive this push.
-				pushedAt: expect.any(Number),
-			}),
-		);
-	});
-
-	// The spec stays in the apps repository, so the task input stays small.
-	it("gives the teardown only the fields of the spec that name the resources", async () => {
-		await removeApp(tasks, SHOP_APP);
-
-		expect(mocks.deleteAppResources).toHaveBeenCalledWith(
-			{ user: "demo", appName: "shop", resourcePrefix: "acme" },
-			expect.objectContaining({ workspaceId: "tea-test" }),
-		);
-	});
-
-	// Only a Blueprint creates the resources of an app, so without one no sync
-	// can bring a resource back.
-	it("deletes without a wait when no Blueprint watches the apps repository", async () => {
-		mocks.findBlueprint.mockResolvedValue(null);
-
-		await expect(removeApp(tasks, SHOP_APP)).resolves.toEqual(SHOP_RESOURCES);
-
-		expect(mocks.waitForBlueprintSyncs).not.toHaveBeenCalled();
-		expect(steps).toEqual([
-			"commit",
-			"push",
-			"delete resources",
-			"commit",
-			"push",
-		]);
-		expect(logged("warn")).toContainEqual(
-			expect.objectContaining({ event: "blueprint_not_found" }),
-		);
-	});
-
-	// A delete that failed after its first push starts again from there.
-	it("continues a delete that an earlier attempt started", async () => {
-		const deletedAt = "2026-02-01T00:00:00.000Z";
-		clone([
-			[APP_SPEC, json({ ...spec, deletedAt })],
+	it("deletes no Render resource when the repository has no spec for the app, and still removes its files", async () => {
+		useRepo([
 			[APP_SOURCE, STOREFRONT_HTML],
 			[CAFE_SPEC, json(cafe)],
-			[ROOT_BLUEPRINT, rootBlueprint([cafe])],
 		]);
 
-		await removeApp(tasks, SHOP_APP);
+		const result = await deleteApp.func(tasks, SHOP_APP);
 
-		expect(steps).toEqual([
-			"wait for syncs",
-			"delete resources",
-			"commit",
-			"push",
+		expect(result).toMatchObject({ status: "deleted", deleted: [] });
+		expect(subtasks()).toEqual([
+			"remove-app-from-blueprint",
+			"remove-app-files",
 		]);
-		expect(mocks.waitForBlueprintSyncs).toHaveBeenCalledWith(
-			"exs-test",
-			expect.objectContaining({ pushedAt: null }),
-		);
-		expect(logged("log")).toContainEqual({
-			event: "app_removed_from_blueprint",
-			user: "demo",
-			appName: "shop",
-			deletedAt,
-			commit: null,
-		});
-	});
-
-	it("deletes nothing on Render for an app that has no spec", async () => {
-		clone([[CAFE_SPEC, json(cafe)]]);
-
-		await expect(removeApp(tasks, SHOP_APP)).resolves.toEqual([]);
-
-		expect(mocks.findBlueprint).not.toHaveBeenCalled();
-		expect(mocks.waitForBlueprintSyncs).not.toHaveBeenCalled();
 		expect(mocks.deleteAppResources).not.toHaveBeenCalled();
-		expect(steps).toEqual([]);
-		expect(logged("log")).toContainEqual({
-			event: "app_spec_not_found",
-			user: "demo",
-			appName: "shop",
-		});
+		expect(repo.has(APP_SOURCE)).toBe(false);
 	});
 
-	it("keeps the files and the spec when Render does not delete a resource", async () => {
-		mocks.deleteAppResources.mockRejectedValue(
-			new Error("Render did not delete acme-demo-shop-api (403)"),
-		);
-
-		await expect(removeApp(tasks, SHOP_APP)).rejects.toThrow("(403)");
-
-		expect(steps).toEqual(["commit", "push", "wait for syncs"]);
-		expect(files.get(APP_SOURCE)).toBe(STOREFRONT_HTML);
-		expect(JSON.parse(files.get(APP_SPEC) ?? "").deletedAt).toEqual(
-			expect.any(String),
-		);
-	});
-
-	// The resource names come from the spec, so a wrong spec would delete the
-	// resources of a different app.
-	it("changes nothing when factory.json is the spec of a different app", async () => {
-		clone([
-			[APP_SPEC, json(cafe)],
-			[APP_SOURCE, STOREFRONT_HTML],
-		]);
-
-		await expect(removeApp(tasks, SHOP_APP)).rejects.toThrow(
-			"is not a valid spec of demo/shop",
-		);
-
-		expect(steps).toEqual([]);
-		expect(files.get(APP_SOURCE)).toBe(STOREFRONT_HTML);
-		expect(fake.sandbox.terminate).toHaveBeenCalledTimes(1);
-	});
-
-	// A delete of one app changes no file of another app.
-	it("commits only the directory of the app and the root Blueprint", async () => {
-		await removeApp(tasks, SHOP_APP);
-
-		const scopes = mocks.commitPaths.mock.calls.map(([, , paths]) => paths);
-		expect(scopes).toEqual([
-			["apps/demo/shop", "render.yaml"],
-			["apps/demo/shop", "render.yaml"],
-		]);
-		for (const call of mocks.pushVerified.mock.calls) {
-			expect(call[4]).toEqual(["apps/demo/shop", "render.yaml"]);
-		}
-	});
-
-	// So that each push starts from the newest commit, and no sandbox runs
-	// while the other steps wait.
-	it("clones the apps repository in a new sandbox for each push, and terminates it", async () => {
-		await removeApp(tasks, SHOP_APP);
-
-		expect(mocks.createSandbox).toHaveBeenCalledTimes(2);
-		expect(mocks.cloneAppsRepo).toHaveBeenCalledTimes(2);
-		expect(fake.sandbox.terminate).toHaveBeenCalledTimes(2);
-	});
-
-	it("logs the commit of each step that pushes", async () => {
-		await removeApp(tasks, SHOP_APP);
-
-		expect(logged("log")).toEqual([
-			{
-				event: "app_removed_from_blueprint",
-				user: "demo",
-				appName: "shop",
-				deletedAt: expect.any(String),
-				commit: "c".repeat(40),
-			},
-			{
-				event: "app_files_removed",
-				user: "demo",
-				appName: "shop",
-				commit: "c".repeat(40),
-			},
-		]);
-	});
-});
-
-describe("deleteApp", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		vi.spyOn(console, "log").mockImplementation(() => {});
-		vi.spyOn(console, "warn").mockImplementation(() => {});
-		vi.spyOn(console, "error").mockImplementation(() => {});
-		process.env.APPS_REPO = "acme/apps";
-		process.env.RENDER_WORKSPACE_ID = "tea-test";
-		files = new Map([
-			[APP_SPEC, json(spec)],
-			[APP_SOURCE, STOREFRONT_HTML],
-		]);
-		fake = fakeSandbox(files);
-		mocks.createSandbox.mockResolvedValue(fake.sandbox);
-		mocks.githubToken.mockResolvedValue("token");
-		mocks.cloneAppsRepo.mockResolvedValue("https://github.com/acme/apps.git");
-		mocks.commitPaths.mockResolvedValue("c".repeat(40));
-		mocks.pushVerified.mockResolvedValue("c".repeat(40));
-		mocks.findBlueprint.mockResolvedValue(null);
-		mocks.deleteAppResources.mockResolvedValue([]);
-	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
-	it("deletes the runs of the app after the app is gone", async () => {
-		await expect(deleteApp.func(tasks, SHOP_APP)).resolves.toMatchObject({
-			status: "deleted",
-		});
-
-		expect(mocks.deleteRuns).toHaveBeenCalledWith("demo", "shop");
-		expect(mocks.failDelete).not.toHaveBeenCalled();
-		expect(fake.sandbox.terminate).toHaveBeenCalled();
-		expect(logged("log").at(-1)).toEqual({
-			event: "app_deleted",
-			user: "demo",
-			appName: "shop",
-			deleted: [],
-		});
-	});
-
-	it("keeps the runs, marked delete_failed, when the delete fails", async () => {
+	it("marks the app delete_failed, and keeps its runs and files, when a step fails", async () => {
 		mocks.deleteAppResources.mockRejectedValue(
 			new Error("Render did not delete acme-demo-shop-db (403)"),
 		);
@@ -1387,476 +1050,33 @@ describe("deleteApp", () => {
 		expect(mocks.failDelete).toHaveBeenCalledWith(
 			"demo",
 			"shop",
-			"Render did not delete acme-demo-shop-db (403)",
+			expect.stringMatching(/\(403\)/),
 		);
 		expect(mocks.deleteRuns).not.toHaveBeenCalled();
-		expect(fake.sandbox.terminate).toHaveBeenCalled();
-		expect(logged("error")).toEqual([
-			{
-				event: "app_delete_failed",
-				user: "demo",
-				appName: "shop",
-				error: "Render did not delete acme-demo-shop-db (403)",
-			},
-		]);
-	});
-
-	it("starts no sandbox for an app name that is not a slug", async () => {
-		await expect(
-			deleteApp.func(tasks, { user: "demo", appName: "../shop" }),
-		).rejects.toThrow();
-		expect(mocks.createSandbox).not.toHaveBeenCalled();
-	});
-
-	// A failed step fails the delete, and the next DELETE starts again at the
-	// first step, which reads what the failed attempt left.
-	it("registers the delete and each of its steps with no retries", () => {
-		for (const definition of [
-			deleteApp,
-			removeFromBlueprintTask,
-			waitForSyncsTask,
-			deleteResourcesTask,
-			removeFilesTask,
-		]) {
-			expect(
-				TaskRegistry.getInstance().get(definition.name)?.options?.retry,
-				definition.name,
-			).toEqual({ max_retries: 0, wait_duration_ms: 0 });
-		}
+		expect(subtasks()).not.toContain("remove-app-files");
+		expect(repo.get(APP_SOURCE)).toBe(STOREFRONT_HTML);
 	});
 });
 
-describe("promptToApp", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		process.env.APPS_REPO = "acme/apps";
-		process.env.RENDER_WORKSPACE_ID = "tea-test";
-		process.env.RENDER_API_KEY = "rnd_test";
-		mocks.architectTask.mockResolvedValue({
-			appName: "shop",
-			summary: "A storefront for handmade walnut furniture.",
-			tiers: [{ kind: "static_site", reason: "The catalog does not change." }],
-			assetQueries: [],
-			brief: {
-				pages: ["Home"],
-				features: [],
-				voice: "Warm and plain",
-				content: "Walnut chairs, oak tables, and ash stools.",
-			},
-		});
-	});
+/* ── Retries ──────────────────────────────────────────────────────────── */
 
-	// The delete would remove what the run publishes.
-	it("builds nothing when a delete of the app is in progress", async () => {
-		mocks.claimRunApp.mockResolvedValueOnce({
-			claimed: false,
-			reason: "deleting",
-		});
-
-		const result = await promptToApp.func(tasks, {
-			prompt: "Sell handmade walnut furniture online",
-			user: "demo",
-			runId: "run-1",
-		});
-
-		expect(result).toEqual({
-			status: "failed",
-			summary: expect.stringContaining("demo/shop is being deleted"),
-		});
-		expect(mocks.claimRunApp).toHaveBeenCalledWith("run-1", "demo", {
-			appName: "shop",
-			blueprintPath: "apps/demo/shop/render.yaml",
-		});
-		expect(mocks.createSandbox).not.toHaveBeenCalled();
-		expect(mocks.finishRun).toHaveBeenCalledWith("run-1", "failed", {
-			summary: expect.stringContaining("being deleted"),
-		});
-	});
-
-	// Both runs would write apps/demo/shop/, and each one would wait for the
-	// deploys of the other.
-	it("builds nothing when a different run builds the same app", async () => {
-		mocks.claimRunApp.mockResolvedValueOnce({
-			claimed: false,
-			reason: "running",
-		});
-
-		const result = await promptToApp.func(tasks, {
-			prompt: "Sell handmade walnut furniture online",
-			user: "demo",
-			runId: "run-2",
-		});
-
-		expect(result).toEqual({
-			status: "failed",
-			summary:
-				"A different run is building demo/shop. Submit the prompt again when that run finishes.",
-		});
-		expect(mocks.createSandbox).not.toHaveBeenCalled();
-	});
-
-	// A failed run is final. The task sets its runs row to "failed" and throws,
-	// and Render then records a failed task run. A retry by Render starts the
-	// pipeline again outside the concurrency limit, and its result can replace
-	// the terminal status that the UI and the demo already showed.
-	it("records a failure once, and Render does not run the task again", async () => {
-		const reason = 'Subtask failed: Agent "architect" failed: error_max_turns';
-		mocks.architectTask.mockRejectedValue(new Error(reason));
-
-		await expect(
-			promptToApp.func(tasks, {
-				prompt: "Sell handmade walnut furniture online",
-				user: "demo",
-				runId: "run-1",
-			}),
-		).rejects.toThrow(reason);
-
-		expect(mocks.finishRun).toHaveBeenCalledTimes(1);
-		expect(mocks.finishRun).toHaveBeenCalledWith("run-1", "failed", {
-			summary: reason,
-		});
-		// The options that the host sends to Render when it registers tasks.
+// AGENTS.md, Durability: a retry of any of these repeats a side effect or
+// hides a failure, so a failure is final and a caller starts again.
+it("registers prompt-to-app, verify-app, publish-app, delete-app, and each delete step with retries off", () => {
+	const definitions = [
+		promptToApp,
+		verifyAppTask,
+		publishAppTask,
+		deleteApp,
+		removeFromBlueprintTask,
+		waitForSyncsTask,
+		deleteResourcesTask,
+		removeFilesTask,
+	];
+	for (const { name } of definitions) {
 		expect(
-			TaskRegistry.getInstance().get(promptToApp.name)?.options?.retry,
-		).toEqual({ max_retries: 0, wait_duration_ms: 0 });
-	});
-
-	/**
-	 * The verification and the publish are subtasks. On Render, each one has
-	 * its own run, with its input, its result, and its logs.
-	 */
-	describe("verify and publish", () => {
-		const INPUT = {
-			prompt: "Sell handmade walnut furniture online",
-			user: "demo",
-			runId: "run-1",
-		};
-		const site: Manifest = {
-			services: [
-				{
-					name: "web",
-					kind: "static_site",
-					rootDir: "web",
-					runtime: "static",
-					buildCommand: "npm ci && npm run build",
-					staticPublishPath: "dist",
-				},
-			],
-		};
-
-		/** The app of a different user, in the apps repository. */
-		const victim: AppSpec = {
-			...spec,
-			user: "victim",
-			appName: "site",
-			prompt: "A bakery",
-		};
-		const VICTIM_DIR = appPath("victim", "site");
-		const PUBLISHED_PATHS = ["apps/demo/shop", factoryConfig.blueprintPath];
-
-		function builderOutput(built: Manifest) {
-			return { summary: "A storefront.", manifest: built };
-		}
-
-		beforeEach(() => {
-			vi.spyOn(console, "log").mockImplementation(() => {});
-			vi.spyOn(console, "warn").mockImplementation(() => {});
-			files = new Map([
-				[`${VICTIM_DIR}/factory.json`, json(victim)],
-				[`${VICTIM_DIR}/index.html`, STOREFRONT_HTML],
-			]);
-			fake = fakeSandbox(files);
-			newBuild([[`${APP_DIR}/web/index.html`, STOREFRONT_HTML]]);
-			// The sandbox of the run first, and then the sandbox of the push.
-			mocks.createSandbox
-				.mockReset()
-				.mockResolvedValueOnce(build.sandbox)
-				.mockResolvedValue(fake.sandbox);
-			mocks.githubToken.mockResolvedValue("token");
-			mocks.cloneAppsRepo.mockResolvedValue("https://github.com/acme/apps.git");
-			mocks.buildTask.mockResolvedValue(builderOutput(site));
-			mocks.commitPaths.mockResolvedValue("c".repeat(40));
-			mocks.pushVerified.mockResolvedValue("c".repeat(40));
-			// No Blueprint watches the apps repository, so the run ends after
-			// the push.
-			mocks.findBlueprint.mockResolvedValue(null);
-		});
-
-		afterEach(() => {
-			vi.restoreAllMocks();
-		});
-
-		// Only a link in the UI needs the sandbox record.
-		it("runs on when it cannot record the sandbox", async () => {
-			vi.spyOn(console, "error").mockImplementation(() => {});
-			mocks.sandboxGroupId.mockRejectedValueOnce(new Error("forbidden"));
-			mocks.setRunSandbox.mockRejectedValueOnce(new Error("store down"));
-
-			const result = await promptToApp.func(tasks, INPUT);
-
-			expect(result.status, result.summary).toBe("awaiting_blueprint");
-			expect(mocks.setRunSandbox).toHaveBeenCalledWith("run-1", {
-				id: build.sandbox.id,
-				groupId: null,
-			});
-		});
-
-		it("verifies the app and then publishes it", async () => {
-			const { context, runs } = recordSubtasks();
-
-			const result = await promptToApp.func(context, INPUT);
-
-			expect(result.status, result.summary).toBe("awaiting_blueprint");
-			// The UI links to the sandbox of the run in the Render Dashboard.
-			expect(mocks.setRunSandbox).toHaveBeenCalledWith("run-1", {
-				id: build.sandbox.id,
-				groupId: "sbg-test",
-			});
-			expect(runs.map(({ name }) => name)).toEqual([
-				"architect",
-				"builder",
-				"verify-app",
-				"publish-app",
-			]);
-			expect(runs[2].input).toEqual({
-				sandboxId: build.sandbox.id,
-				user: "demo",
-				appName: "shop",
-				manifest: site,
-				databaseUrl: null,
-			});
-			expect(runs[3].input).toEqual({
-				sandboxId: build.sandbox.id,
-				spec: expect.objectContaining({
-					user: "demo",
-					appName: "shop",
-					manifest: site,
-				}),
-				message: "demo/shop: Sell handmade walnut furniture online",
-			});
-			// The clone of the push holds the files of the build.
-			expect(files.get(`${APP_DIR}/web/index.html`)).toBe(STOREFRONT_HTML);
-			expect(files.get(`${APP_DIR}/.gitignore`)).toContain("node_modules/");
-			expect(JSON.parse(files.get(APP_SPEC) ?? "").manifest).toEqual(site);
-			expect(files.get(ROOT_BLUEPRINT)).toContain(
-				`${factoryConfig.resourcePrefix}-demo-shop-web`,
-			);
-			expect(build.sandbox.terminate).toHaveBeenCalledTimes(1);
-			expect(fake.sandbox.terminate).toHaveBeenCalledTimes(1);
-			expect(logged("log")).toEqual([
-				{ event: "app_verified", user: "demo", appName: "shop" },
-				{
-					event: "app_published",
-					user: "demo",
-					appName: "shop",
-					commit: "c".repeat(40),
-				},
-			]);
-		});
-
-		it("gives the failures of verify-app to the builder, and publishes only after a pass", async () => {
-			mocks.buildTask.mockResolvedValueOnce(
-				builderOutput({
-					services: [
-						{
-							...site.services[0],
-							envVars: [
-								{
-									key: "VITE_API_HOST",
-									fromService: { name: "api", property: "host" },
-								},
-							],
-						},
-					],
-				}),
-			);
-			const { context, runs } = recordSubtasks();
-
-			const result = await promptToApp.func(context, INPUT);
-
-			expect(result.status, result.summary).toBe("awaiting_blueprint");
-			expect(runs.map(({ name }) => name)).toEqual([
-				"architect",
-				"builder",
-				"verify-app",
-				"builder",
-				"verify-app",
-				"publish-app",
-			]);
-			const failure =
-				"web: envVar VITE_API_HOST uses fromService property host.";
-			expect(mocks.buildTask.mock.calls[1][1].message).toContain(failure);
-			expect(logged("log")[0]).toEqual({
-				event: "app_verification_failed",
-				user: "demo",
-				appName: "shop",
-				failures: [expect.stringContaining(failure)],
-			});
-			expect(mocks.commitPaths).toHaveBeenCalledTimes(1);
-		});
-
-		/**
-		 * The builder can run any command in the sandbox of the run, and a
-		 * process that it starts stays there. The token once went into that
-		 * sandbox for the clone, and again for the push.
-		 */
-		it("gives the GitHub token only to the sandbox of the push", async () => {
-			mocks.githubToken.mockResolvedValue("ghs_push");
-			const { context, runs } = recordSubtasks();
-
-			await promptToApp.func(context, INPUT);
-
-			// After the builder: an installation token expires after an hour,
-			// and a run can take two.
-			expect(mocks.githubToken).toHaveBeenCalledOnce();
-			expect(mocks.githubToken.mock.invocationCallOrder[0]).toBeGreaterThan(
-				Math.max(...mocks.buildTask.mock.invocationCallOrder),
-			);
-			expect(mocks.cloneAppsRepo.mock.calls).toEqual([
-				[
-					fake.sandbox,
-					"ghs_push",
-					expect.objectContaining({ fullName: "acme/apps" }),
-					factoryConfig.branch,
-				],
-			]);
-			expect(mocks.pushVerified).toHaveBeenCalledWith(
-				fake.sandbox,
-				"ghs_push",
-				"https://github.com/acme/apps.git",
-				factoryConfig.branch,
-				PUBLISHED_PATHS,
-				expect.any(Function),
-			);
-			// The sandbox of the run gets a repository with no remote.
-			const commands = build.run.mock.calls.map(([command]) => command);
-			expect(commands[0]).toBe(
-				`git init -q '${factoryConfig.repoDir}' && mkdir -p '${APP_DIR}'`,
-			);
-			expect(commands.join("\n")).not.toMatch(/ghs_|clone|askpass/);
-			// The Render Dashboard shows the input of each subtask.
-			expect(JSON.stringify(runs)).not.toContain("ghs_");
-		});
-
-		it("copies only the app directory out of the sandbox of the run", async () => {
-			// The builder can write outside its app directory in its sandbox.
-			buildFiles.set(`${VICTIM_DIR}/index.html`, "defaced");
-
-			await promptToApp.func(tasks, INPUT);
-
-			expect(mocks.readAppFiles).toHaveBeenLastCalledWith(
-				build.sandbox,
-				APP_DIR,
-			);
-			expect(mocks.writeAppFiles).toHaveBeenCalledWith(
-				fake.sandbox,
-				APP_DIR,
-				expect.any(Array),
-			);
-			expect(mocks.commitPaths).toHaveBeenCalledWith(
-				fake.sandbox,
-				"demo/shop: Sell handmade walnut furniture online",
-				PUBLISHED_PATHS,
-			);
-			expect(files.get(`${VICTIM_DIR}/index.html`)).toBe(STOREFRONT_HTML);
-			expect(JSON.parse(files.get(`${VICTIM_DIR}/factory.json`) ?? "")).toEqual(
-				victim,
-			);
-		});
-
-		// publish-app writes the spec of the run over a factory.json of the
-		// builder, so a build cannot add resources that no run verified.
-		it("replaces a factory.json that the builder wrote", async () => {
-			buildFiles.set(
-				APP_SPEC,
-				json({ ...victim, user: "demo", appName: "evil" }),
-			);
-
-			await promptToApp.func(tasks, INPUT);
-
-			expect(JSON.parse(files.get(APP_SPEC) ?? "")).toMatchObject({
-				user: "demo",
-				appName: "shop",
-			});
-			expect(files.get(ROOT_BLUEPRINT)).not.toContain("demo-evil");
-		});
-
-		// The root Blueprint takes each spec of the repository, but only in the
-		// directory of the app that it names.
-		it("leaves a spec that names a different app out of the root Blueprint", async () => {
-			const decoy = `${appPath("demo", "decoy")}/factory.json`;
-			files.set(decoy, json({ ...victim, user: "demo", appName: "evil" }));
-
-			await promptToApp.func(tasks, INPUT);
-
-			const root = files.get(ROOT_BLUEPRINT) ?? "";
-			expect(root).toContain("acme-victim-site-web");
-			expect(root).toContain(`${factoryConfig.resourcePrefix}-demo-shop-web`);
-			expect(root).not.toContain("demo-evil");
-			expect(logged("warn")).toContainEqual({
-				event: "skipped_app_spec",
-				path: decoy,
-				reason: "it names demo/evil",
-			});
-		});
-
-		it("gives the builder what publish-app would refuse", async () => {
-			const refusal =
-				"web/home.html is a symbolic link. Only regular files are published.";
-			mocks.readAppFiles.mockResolvedValueOnce({ error: refusal });
-			const { context, runs } = recordSubtasks();
-
-			const result = await promptToApp.func(context, INPUT);
-
-			expect(result.status, result.summary).toBe("awaiting_blueprint");
-			expect(runs.map(({ name }) => name)).toEqual([
-				"architect",
-				"builder",
-				"verify-app",
-				"builder",
-				"verify-app",
-				"publish-app",
-			]);
-			expect(mocks.buildTask.mock.calls[1][1].message).toContain(refusal);
-		});
-
-		it("pushes nothing when the files of the app change after verify-app", async () => {
-			mocks.readAppFiles
-				.mockResolvedValueOnce({ files: [] })
-				.mockResolvedValueOnce({ error: "web/home.html is a symbolic link." });
-
-			await expect(promptToApp.func(tasks, INPUT)).rejects.toThrow(
-				"publish-app did not copy the app. web/home.html is a symbolic link.",
-			);
-
-			// No sandbox for the push.
-			expect(mocks.createSandbox).toHaveBeenCalledTimes(1);
-			expect(mocks.githubToken).not.toHaveBeenCalled();
-			expect(mocks.pushVerified).not.toHaveBeenCalled();
-		});
-
-		it("ends the run as build_failed when the publish changes no files", async () => {
-			mocks.commitPaths.mockResolvedValue(null);
-
-			const result = await promptToApp.func(tasks, INPUT);
-
-			expect(result).toEqual({
-				status: "build_failed",
-				summary: "The run produced no files.",
-			});
-			expect(mocks.pushVerified).not.toHaveBeenCalled();
-			expect(mocks.findBlueprint).not.toHaveBeenCalled();
-		});
-
-		// A retry of publish-app after its push finds nothing to commit. A
-		// retry of verify-app after a timeout runs every build again.
-		it("registers verify-app and publish-app with no retries", () => {
-			for (const definition of [verifyAppTask, publishAppTask]) {
-				expect(
-					TaskRegistry.getInstance().get(definition.name)?.options?.retry,
-					definition.name,
-				).toEqual({ max_retries: 0, wait_duration_ms: 0 });
-			}
-		});
-	});
+			TaskRegistry.getInstance().get(name)?.options?.retry?.max_retries,
+			name,
+		).toBe(0);
+	}
 });

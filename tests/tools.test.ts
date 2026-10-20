@@ -1,217 +1,211 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ExecResult, Sandbox } from "../app/sandbox.js";
+import { execSync } from "node:child_process";
 import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { type ExecResult, type Sandbox, shellEscape } from "../app/sandbox.js";
+import {
+	MAX_OUTPUT_CHARS,
 	sandboxApplyPatch,
 	sandboxExec,
-	sandboxListDir,
-	sandboxReadFile,
-	sandboxSearch,
+	sandboxExecTool,
 	sandboxWriteFile,
 	type ToolContext,
 } from "../app/tools.js";
 
-const APP_DIR = "/home/user/repo/apps/demo/shop";
+/**
+ * A git hook that runs the tests sets GIT_DIR, which would send git apply to
+ * the outer repository.
+ */
+const env = Object.fromEntries(
+	Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+);
 
-function context(sandbox: Partial<Sandbox>, workDir = APP_DIR): ToolContext {
-	return { sandbox: sandbox as Sandbox, workDir };
+/**
+ * A sandbox that runs each command in a real shell on this machine. macOS has
+ * no coreutils `timeout`, so the fake unwraps it and can simulate its 124 exit.
+ */
+function localSandbox(timedOutCommand?: string) {
+	const uploaded: string[] = [];
+	const commands: string[] = [];
+	const run = async (wrapped: string): Promise<ExecResult> => {
+		commands.push(wrapped);
+		if (
+			timedOutCommand &&
+			wrapped.includes(`sh -c ${shellEscape(timedOutCommand)}`)
+		) {
+			return { output: "", exitCode: 124 };
+		}
+		const command = wrapped.replace(
+			/timeout --signal=TERM --kill-after=5s [0-9.]+s sh -c /,
+			"sh -c ",
+		);
+		try {
+			return {
+				output: execSync(command, { encoding: "utf8", env, stdio: "pipe" }),
+				exitCode: 0,
+			};
+		} catch (error) {
+			const failed = error as {
+				status?: number;
+				stdout?: string;
+				stderr?: string;
+			};
+			return {
+				output: `${failed.stdout ?? ""}${failed.stderr ?? ""}`,
+				exitCode: failed.status ?? 1,
+			};
+		}
+	};
+	const sandbox = {
+		run,
+		async upload(path: string, data: string) {
+			uploaded.push(path);
+			writeFileSync(path, data);
+		},
+		async writeFile(path: string, data: string) {
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(path, data);
+		},
+	} as unknown as Sandbox;
+	return { sandbox, uploaded, commands };
 }
 
-type RunFn = (command: string) => Promise<ExecResult>;
+describe("sandbox tools", () => {
+	const temporary: string[] = [];
 
-/** Typed so assertions can read back the command that was run. */
-const runMock = (output: string, exitCode = 0) =>
-	vi.fn<RunFn>(async () => ({ output, exitCode }));
-
-describe("sandbox__exec", () => {
-	it("returns command output on success", async () => {
-		const run = runMock("all tests passed");
-		const out = await sandboxExec.invoke(
-			{ command: "npm test" },
-			context({ run }),
-		);
-
-		expect(out.content).toBe("all tests passed");
-		expect(out.isError).toBe(false);
+	afterEach(() => {
+		for (const dir of temporary.splice(0)) {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
-	/**
-	 * The exec API starts in `/`. A run once built an entire application from
-	 * relative paths, landing it in `/root` — outside the checkout, so the
-	 * commit found nothing and no stage reported a failure.
-	 */
-	it("runs from the app directory when given no cwd", async () => {
-		const run = runMock("");
-		await sandboxExec.invoke({ command: "mkdir -p web" }, context({ run }));
-
-		expect(run.mock.calls[0][0]).toBe(
-			"cd '/home/user/repo/apps/demo/shop' && mkdir -p web",
+	/** An app directory inside a parent that stands for the apps repository. */
+	function context(
+		timedOutCommand?: string,
+	): ToolContext & { uploaded: string[]; commands: string[]; repo: string } {
+		// Keep this outside /tmp. The tool deliberately permits /tmp as scratch,
+		// so a repository created there cannot test an absolute path escape.
+		const repo = realpathSync(
+			mkdtempSync(join(dirname(process.cwd()), ".tools-test-")),
 		);
-	});
+		temporary.push(repo);
+		const workDir = join(repo, "apps/demo/shop");
+		mkdirSync(workDir, { recursive: true });
+		const { sandbox, uploaded, commands } = localSandbox(timedOutCommand);
+		return { sandbox, workDir, uploaded, commands, repo };
+	}
 
-	it("resolves a relative cwd against the app directory", async () => {
-		const run = runMock("");
-		await sandboxExec.invoke(
-			{ command: "npm ci", cwd: "api" },
-			context({ run }),
+	it("resolves a relative path against the app directory and rejects a path outside it and /tmp", async () => {
+		const ctx = context();
+
+		const wrote = await sandboxWriteFile.invoke(
+			{ path: "src/x.ts", content: "export {};" },
+			ctx,
 		);
-
-		expect(run.mock.calls[0][0]).toBe(
-			"cd '/home/user/repo/apps/demo/shop/api' && npm ci",
-		);
-	});
-
-	it.each([
-		"/root",
-		"/home/user/repo/../../etc",
-		"../../../../../../root",
-		// The rest of the apps repository is not part of the app.
-		"/home/user/repo",
-		"../../victim/site",
-	])("refuses to run in %s", async (cwd) => {
-		const run = runMock("");
-		const out = await sandboxExec.invoke(
-			{ command: "npm ci", cwd },
-			context({ run }),
+		expect(wrote.isError).toBeUndefined();
+		expect(readFileSync(join(ctx.workDir, "src/x.ts"), "utf8")).toBe(
+			"export {};",
 		);
 
-		expect(out.isError).toBe(true);
-		expect(out.content).toContain("outside the app directory");
-		expect(run).not.toHaveBeenCalled();
-	});
-
-	it("reports a non-zero exit as a tool error with its exit code", async () => {
-		const run = runMock("1 failing", 1);
-		const out = await sandboxExec.invoke(
-			{ command: "npm test" },
-			context({ run }),
-		);
-
-		expect(out.isError).toBe(true);
-		expect(out.content).toContain("Exit code: 1");
-		expect(out.content).toContain("1 failing");
-	});
-
-	it("runs inside an absolute cwd inside the checkout", async () => {
-		const run = runMock("");
-		await sandboxExec.invoke(
-			{ command: "ls", cwd: "/home/user/repo/apps/demo/shop/web" },
-			context({ run }),
-		);
-
-		expect(run.mock.calls[0][0]).toBe(
-			"cd '/home/user/repo/apps/demo/shop/web' && ls",
-		);
-	});
-});
-
-describe("sandbox file tools", () => {
-	it("reads a file", async () => {
-		const readFile = vi.fn(async () => "export const x = 1;");
-		const out = await sandboxReadFile.invoke(
-			{ path: "src/x.ts" },
-			context({ readFile }),
-		);
-
-		expect(readFile).toHaveBeenCalledWith(`${APP_DIR}/src/x.ts`);
-		expect(out.content).toBe("export const x = 1;");
-	});
-
-	it("writes relative paths into the app directory", async () => {
-		const writeFile = vi.fn(async () => undefined);
-		const out = await sandboxWriteFile.invoke(
-			{ path: "src/x.ts", content: "hello" },
-			context({ writeFile }),
-		);
-
-		expect(writeFile).toHaveBeenCalledWith(`${APP_DIR}/src/x.ts`, "hello");
-		expect(out.content).toContain("Wrote 5 bytes");
-	});
-
-	it.each(["/root/index.html", "../../victim/site/index.html"])(
-		"refuses to write %s, outside the app directory",
-		async (path) => {
-			const writeFile = vi.fn(async () => undefined);
-			const out = await sandboxWriteFile.invoke(
-				{ path, content: "hello" },
-				context({ writeFile }),
+		for (const path of [
+			"../../victim/site/index.html",
+			`${ctx.repo}/render.yaml`,
+		]) {
+			const refused = await sandboxWriteFile.invoke(
+				{ path, content: "planted" },
+				ctx,
 			);
-
-			expect(out.isError).toBe(true);
-			expect(writeFile).not.toHaveBeenCalled();
-		},
-	);
-
-	it("defaults list_dir to the app directory", async () => {
-		const listDir = vi.fn(async () => ["a.ts", "b/"]);
-		const out = await sandboxListDir.invoke({}, context({ listDir }));
-
-		expect(listDir).toHaveBeenCalledWith(APP_DIR);
-		expect(out.content).toBe("a.ts\nb/");
+			expect(refused.isError).toBe(true);
+		}
+		expect(existsSync(join(ctx.repo, "apps/victim"))).toBe(false);
+		expect(existsSync(join(ctx.repo, "render.yaml"))).toBe(false);
 	});
 
-	it("describes an empty directory rather than returning nothing", async () => {
-		const listDir = vi.fn(async () => []);
-		const out = await sandboxListDir.invoke(
-			{ path: "empty" },
-			context({ listDir }),
+	// The exec API starts in `/`. A run once built a whole app from relative
+	// paths outside the directory that gets committed.
+	it("runs sandbox__exec from the app directory and reports a non-zero exit as an error", async () => {
+		const ctx = context();
+
+		const pwd = await sandboxExec.invoke({ command: "pwd" }, ctx);
+		expect(pwd).toEqual({ content: `${ctx.workDir}\n`, isError: false });
+
+		const failed = await sandboxExec.invoke(
+			{ command: "echo '1 failing'; exit 3" },
+			ctx,
 		);
-		expect(out.content).toBe("(empty directory)");
+		expect(failed.isError).toBe(true);
+		expect(failed.content).toContain("Exit code: 3");
+		expect(failed.content).toContain("1 failing");
+	});
+
+	it("terminates a sandbox__exec command that does not exit", async () => {
+		const ctx = context("sleep 10");
+		const execWithShortTimeout = sandboxExecTool(0.05);
+
+		const started = Date.now();
+		const timedOut = await execWithShortTimeout.invoke(
+			{ command: "sleep 10" },
+			ctx,
+		);
+
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(ctx.commands[0]).toContain(
+			"timeout --signal=TERM --kill-after=5s 0.05s sh -c",
+		);
+		expect(timedOut).toEqual({
+			content: "Command timed out after 0.05 seconds.",
+			isError: true,
+		});
+	});
+
+	it("applies a patch with sandbox__apply_patch and removes the patch file whether it applies or not", async () => {
+		const ctx = context();
+		writeFileSync(join(ctx.workDir, "index.html"), "old\n");
+		const diff =
+			"--- a/index.html\n+++ b/index.html\n@@ -1 +1 @@\n-old\n+new\n";
+
+		const applied = await sandboxApplyPatch.invoke({ diff }, ctx);
+		expect(applied.isError).toBeUndefined();
+		expect(readFileSync(join(ctx.workDir, "index.html"), "utf8")).toBe("new\n");
+
+		const rejected = await sandboxApplyPatch.invoke({ diff }, ctx);
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content).toContain("Patch failed");
+
+		expect(ctx.uploaded).toHaveLength(2);
+		for (const path of ctx.uploaded) expect(existsSync(path)).toBe(false);
+	});
+
+	it("truncates output past the limit", async () => {
+		const ctx = context();
+
+		const out = await sandboxExec.invoke(
+			{ command: `head -c ${MAX_OUTPUT_CHARS + 1000} /dev/zero | tr '\\0' a` },
+			ctx,
+		);
+
+		expect(out.content.startsWith("a".repeat(MAX_OUTPUT_CHARS))).toBe(true);
+		expect(out.content).toContain("truncated, 1000 chars omitted");
 	});
 });
 
-describe("sandbox__search", () => {
-	it("treats ripgrep exit 1 as no matches, not a failure", async () => {
-		const run = runMock("", 1);
-		const out = await sandboxSearch.invoke(
-			{ pattern: "nope" },
-			context({ run }),
-		);
+describe("shellEscape", () => {
+	// Model output, branch names, and file paths all reach a shell.
+	it("passes any string through a real shell as one argument", () => {
+		const value = `it's "$(whoami)" \`id\` $HOME; rm -rf / && echo\nnext line\\`;
 
-		expect(out.content).toBe("(no matches)");
-		expect(out.isError).toBeUndefined();
-	});
+		const echoed = execSync(`printf '%s|' ${shellEscape(value)}`, {
+			encoding: "utf8",
+		});
 
-	it("reports a real ripgrep failure as an error", async () => {
-		const run = runMock("bad pattern", 2);
-		const out = await sandboxSearch.invoke({ pattern: "[" }, context({ run }));
-		expect(out.isError).toBe(true);
-	});
-
-	it("passes an include glob through to ripgrep", async () => {
-		const run = runMock("src/x.ts:1:hit");
-		await sandboxSearch.invoke(
-			{ pattern: "hit", include: "*.ts" },
-			context({ run }),
-		);
-
-		expect(run.mock.calls[0][0]).toContain("'--glob' '*.ts'");
-	});
-});
-
-describe("sandbox__apply_patch", () => {
-	it("uploads the diff and applies it", async () => {
-		const upload = vi.fn(async () => undefined);
-		const run = runMock("");
-		const out = await sandboxApplyPatch.invoke(
-			{ diff: "--- a\n+++ b\n" },
-			context({ upload, run }),
-		);
-
-		expect(upload).toHaveBeenCalledOnce();
-		expect(run.mock.calls[0][0]).toContain("git apply --whitespace=nowarn");
-		expect(out.content).toBe("Patch applied successfully.");
-	});
-
-	it("surfaces a rejected patch as an error", async () => {
-		const out = await sandboxApplyPatch.invoke(
-			{ diff: "garbage" },
-			context({
-				upload: vi.fn(async () => undefined),
-				run: runMock("does not apply", 1),
-			}),
-		);
-
-		expect(out.isError).toBe(true);
-		expect(out.content).toContain("does not apply");
+		expect(echoed).toBe(`${value}|`);
 	});
 });

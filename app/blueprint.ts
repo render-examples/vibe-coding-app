@@ -287,7 +287,6 @@ function singleServiceBlock(
 		`        - ${yamlString(`${serviceDir}/**`)}`,
 	);
 
-	// Wire env vars declared by the manifest.
 	const envLines: string[] = [];
 	for (const envVar of service.envVars ?? []) {
 		if (envVar.fromDatabase) {

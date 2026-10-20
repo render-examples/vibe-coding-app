@@ -1,66 +1,131 @@
 # vibe-code-demo
 
-A reference for taking a natural-language app idea through generation,
-verification, and a real Render deployment. It demonstrates how Workflows,
-Sandboxes, Blueprints, Postgres, and read-only Render MCP access fit together in
-a production-shaped agent system.
+vibe-code-demo turns a plain-English app idea into a live, verified
+application on Render. You type "Build a website for a local barbershop", and a
+few minutes later you have a public URL. When the idea needs saved data, you
+also get an API and a Postgres database, all wired together and smoke-tested.
+
+It is a reference app: real, running TypeScript that shows how Render
+Workflows, Sandboxes, Blueprints, Postgres, and the read-only Render MCP server
+fit together in an agent product.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/vibe-code-demo)
 
+Before you deploy, prepare:
+
+- a Render workspace with Workflows and
+  [Sandboxes early access](https://render.com/docs/sandboxes);
+- an empty GitHub repository for generated apps, with Render's GitHub app
+  installed on it;
+- a GitHub App or fine-grained token with Contents: write on that repository;
+- Anthropic and Render API keys, plus the Render workspace ID; and
+- a lowercase UI username and a UI password of at least 16 characters.
+
+After the factory deploys, complete the
+[one-time apps Blueprint step](docs/0_QUICKSTART.md#connect-the-apps-blueprint).
+
+## Why it matters
+
+Most "prompt to app" demos stop at generated code or a preview. Shipping
+that code as a real multi-service deployment raises harder questions:
+
+- Where does untrusted, model-written code run, and what can it reach?
+- How do you keep the model away from your GitHub token and cloud API keys?
+- How does an agent create infrastructure without being able to create
+  *anything*?
+- How do you know the deployed app works, not just that it built?
+
+This repository answers each of those in code. Agents write and run code only
+in a disposable Render Sandbox that holds no credentials. Infrastructure is
+created only by committing a Render Blueprint, never by an agent calling an
+API. Every app is built, migrated, booted, and queried before it is published,
+and checked again at its public URL after Render deploys it.
+
+It is written for engineers building AI app builders, coding agents, or
+internal platforms on Render, and for anyone who wants a working example of
+those boundaries to read and adapt. It is a demonstration, not a multi-tenant
+product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
+
 ## Architecture at a glance
 
+```text
+ User ──▶ Gateway ───────────▶ Workflows: prompt-to-app ─────▶ Sandbox
+          (web service)        agents, verify, publish          (build and verify)
+             │                    │             │
+             └──▶ Factory DB ◀────┘             ▼
+                  (Postgres)          Apps repository (GitHub)
+                                                │  Blueprint auto-sync
+                                                ▼
+                                Deployed app (site, API, Postgres)
 ```
-User → Gateway (web service) → Render Workflow → Sandbox
-                                     ↓
-                              Apps Repository (GitHub)
-                                     ↓
-                              Blueprint auto-sync → Deployed App
-```
 
-| Component | Render primitive | What it does |
-|---|---|---|
-| **Gateway** | Web Service (Docker) | Authenticates users, records runs in Postgres, dispatches workflow tasks. Holds no model keys or repo credentials. |
-| **Factory DB** | Managed Postgres | Stores run state, idempotency keys, progress, concurrency claims. Enables reconnecting clients and stale-run recovery. |
-| **Orchestrator** | Render Workflow | Runs the three-agent pipeline: Architect → Builder → Deploy Manager, with photographs from Wikimedia Commons between the first two. Owns the Sandbox, model credentials, and GitHub push. |
-| **Sandbox** | Render Sandbox | Isolated Linux environment where agents write code, install deps, run builds, boot services, and query a real Postgres — all throwaway. |
-| **Apps Repository** | GitHub repo | Every generated app is committed here. The root `render.yaml` is the Blueprint Render watches. |
-| **Generated App** | Static Site + Web Service + Postgres | The actual app that gets deployed. Blueprint sync creates these from the committed YAML, in one Render project per app. |
+| Component | Render primitive | Role |
+| --- | --- | --- |
+| Gateway | Web service (Docker) | Authenticates callers, records runs, and starts tasks. It has no model key or GitHub credential, but it does hold the Render API key used for task dispatch. |
+| Factory DB | Managed Postgres | Run state, progress, idempotency, concurrency cap |
+| Workflows host | Workflow | Runs the agents, verification, publish, and deploy checks. Holds the model key and GitHub credential. |
+| Sandbox | Sandbox | Disposable machine where the builder writes and runs code |
+| Apps repository | GitHub repo | Every generated app, plus the root `render.yaml` Render watches |
+| Generated app | Static site, web service, Postgres | One Render project per app, created by Blueprint sync |
 
-## How the Render products come together
+## How the Render products fit together
 
-1. **Web Services** — The gateway is a web service (Hono + Docker). Each generated app's API is also a web service, with health checks, `preDeployCommand` for migrations, and `fromDatabase` / `fromService` env-var wiring.
+- **Web Services** host the gateway and each generated app's API, with
+  health checks and `preDeployCommand` migrations.
+- **Workflows** run the pipeline as a `prompt-to-app` task whose agents and
+  steps are subtasks, each with its own run and logs in the Dashboard.
+- **Sandboxes** give each run an isolated machine, with a real Postgres when
+  the app needs one, and no credentials.
+- **Postgres** stores the factory's run state, and gives each generated app
+  its own managed database.
+- **Blueprints** are the only way the factory creates infrastructure: the
+  workflow commits a `render.yaml`, and Render's Blueprint sync deploys it.
+- **Render MCP** gives two agents read-only views of the workspace, enforced
+  by an allowlist in code.
 
-2. **Workflows** — The orchestration engine. One task (`prompt-to-app`) runs the entire pipeline: design, build, verify, publish, deploy, smoke-test. Sub-tasks (`architect`, `builder`, `deploy-manager`) run as Claude agents with distinct tool grants and trust boundaries. Two more sub-tasks are workflow code: `verify-app` builds, migrates, boots, and queries the app in the sandbox, and `publish-app` generates the Blueprints, commits the app to GitHub, and pushes. A second task, `delete-app`, deletes an app in four sub-tasks, each with its own run and logs: `remove-app-from-blueprint` takes the app out of the Blueprint, `wait-for-blueprint-syncs` waits until no Blueprint sync can bring its Render resources back, `delete-app-resources` deletes them, and `remove-app-files` removes its files.
+## Prerequisites
 
-3. **Sandboxes** — Every run gets a fresh, isolated Linux sandbox. Agents execute code inside it, never on the host. It holds only the app of the run, with no clone of the apps repository and no GitHub token; each push clones the repository in a sandbox of its own. Postgres 18 is installed on the fly inside the sandbox so the builder develops against a real database. The sandbox is terminated in a `finally` block.
-
-4. **Postgres** — Two roles: (a) the factory's own `runs` table for durable state, and (b) a sandbox-local Postgres the generated app builds against. Generated apps also get their own Managed Postgres on Render.
-
-5. **Blueprints** — The only way the factory creates resources on Render. Agents never call the Render API. A Blueprint change never deletes a resource, so the `delete-app` task deletes a deleted app's resources with the API, after the app has left the Blueprint. The workflow writes `render.yaml`, commits to GitHub, and Render's Blueprint sync deploys everything. Every deployment is a Git diff.
-
-6. **MCP** — Read-only Render MCP gives the Architect agent visibility into the workspace (existing services, databases) and gives the Deploy Manager deploy status to diagnose failures. No agent can read logs: the workflow reads the logs of each failed deploy from the Render REST API, removes their secrets, and gives them to the Deploy Manager. Strictly read-only — enforced by allowlist and `PreToolUse` hook.
+- Node.js 22 or later, and Docker (for the local Postgres)
+- The [Render CLI](https://render.com/docs/cli), signed in with `render login`
+- A Render workspace with Workflows and Sandboxes enabled, a Render API key,
+  and the workspace ID (it starts with `tea-`)
+- An Anthropic API key
+- An empty GitHub repository for generated apps
+- A GitHub connection in Render with access to that repository, so its
+  Blueprint can sync
+- A credential that can push to the repository: a fine-grained personal
+  access token or a GitHub App, with Contents: write on that repository
 
 ## Quick start
 
-```bash
-npm ci
-cp .env.example .env   # then fill it in
-npm run dev:postgres
-npm run db:migrate
-```
+The [Quickstart](docs/0_QUICKSTART.md) is the canonical setup guide. It covers
+installation, local processes, the first app, the one-time apps Blueprint,
+deployment, diagnostics, operations, and cleanup.
 
-In separate terminals:
+Local development still creates real Render Sandboxes and deploys real,
+billable services.
 
-```bash
-npm run dev:gateway    # http://localhost:3000
-npm run dev:workflows  # needs the authenticated Render CLI
-```
+## Deploy the factory to Render
 
-Open `http://localhost:3000` and sign in with `UI_USERNAME` and `UI_PASSWORD`.
-Or run `npm run demo -- "Your app idea"` against the gateway.
+Click **Deploy to Render** above, or create a Blueprint from this repository's
+`render.yaml`. It creates the gateway, the workflow service, and their database
+in a `vibe-factory` project, and prompts you for the secrets. If you deploy
+from a fork, first change the `repo:` field of the workflow service in
+`render.yaml` to your fork's URL. [docs/0_QUICKSTART.md](docs/0_QUICKSTART.md#deploy-the-factory-to-render)
+has the full steps.
 
-Full prerequisites, production deployment, and configuration are in
-[docs/](docs/README.md). Agent and code conventions live in [AGENTS.md](AGENTS.md).
+## Documentation
+
+- [Quickstart](docs/0_QUICKSTART.md): setup, first run, deploying the factory,
+  diagnostics, operations, and cleanup
+- [Extension guide](docs/1_EXTENSION.md): factory settings, agents, tools,
+  infrastructure primitives, templates, and pipeline changes
+- [Architecture](docs/2_ARCHITECTURE.md): directory overview, execution paths,
+  core interfaces, trust boundaries, state, and tests
+- [Takeaways](docs/3_TAKEAWAYS.md): lessons to apply in your own agent system
+
+Contributor and coding-agent conventions, invariants, and change checklists
+are in [AGENTS.md](AGENTS.md).
 
 ## License
 

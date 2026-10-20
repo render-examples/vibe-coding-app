@@ -5,7 +5,11 @@
 import type { TaskContext } from "@renderinc/sdk/workflows";
 import { factoryConfig } from "../factory.config.js";
 import { deployManagerTask } from "./agents.js";
-import { declaredResources, resourceNames } from "./blueprint.js";
+import {
+	declaredResources,
+	type ResourceNames,
+	resourceNames,
+} from "./blueprint.js";
 import { runBuilder } from "./build.js";
 import { agentJson } from "./claude.js";
 import {
@@ -17,9 +21,11 @@ import {
 import { redactSecrets } from "./policy.js";
 import { publishAppTask } from "./publish.js";
 import {
+	type BlueprintRecord,
 	type DeployOutcome,
 	fetchDeployLogs,
 	findBlueprint,
+	latestDeploys,
 	pageContains,
 	type ServiceRecord,
 	waitForDeploy,
@@ -35,9 +41,8 @@ const SERVICE_TIMEOUT_MS = 6 * 60 * 1000;
 const DEPLOY_TIMEOUT_MS = 15 * 60 * 1000;
 /**
  * Render can route a new onrender.com hostname some minutes after the first
- * deploy of its service is live. Until then, the hostname gives 404. On
- * 2026-09-24, a new static site gave 404 for more than 3 minutes after its
- * deploy was live, and it gave 200 before 10 minutes. So the first check of
+ * deploy of its service is live, and until then the hostname gives 404. For a
+ * new static site that can last more than 3 minutes, so the first check of
  * each public URL waits this long.
  */
 const ROUTE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -57,28 +62,39 @@ export interface DeployContext {
 	runId: string;
 	summary: string;
 	databaseUrl: string | null;
+	/** From deploysBeforePublish(), read before the push. */
+	deploysBefore: ReadonlyMap<string, string>;
+	/** The manifest services that the push gives a new deploy, from publish-app. */
+	changedServices: readonly string[];
+}
+
+/** The services of the app on Render, keyed by Render service name. */
+type AppServices = Map<string, ServiceRecord>;
+
+/** What a step of the deploy gives the next step, or the end of the run. */
+type Step<T> = { value: T } | { end: WorkflowResult };
+
+/**
+ * The newest deploy of each service of the app that exists, keyed by Render
+ * service name. A rerun of an app replaces an app whose services exist, and
+ * right after the push their newest deploys are still these.
+ */
+export function deploysBeforePublish(
+	workspaceId: string,
+	spec: AppSpec,
+): Promise<Map<string, string>> {
+	return latestDeploys(workspaceId, [...resourceNames(spec).services.values()]);
 }
 
 /**
- * The deploy-manager loop. After the initial push:
- * 1. Wait for services to appear via Blueprint sync
- * 2. Wait for deploys to reach a terminal state
- * 3. If any fail, read the logs of each failed deploy. The deploy-manager
- *    agent diagnoses the failures from these logs
- * 4. The builder fixes what the deploy-manager diagnosed
- * 5. verify-app verifies the repair. publish-app rewrites factory.json and
- *    the Blueprints from the repaired manifest, and pushes. Then wait for a
- *    new deploy of each service that failed. Repeat up to
- *    MAX_DEPLOY_REPAIR_ROUNDS
+ * The deploy stage after the first push: find the Blueprint, wait for it to
+ * create the services, wait for their deploys and repair the ones that fail,
+ * and smoke-test the live app.
  */
 export async function awaitDeployment(
 	ctx: DeployContext,
 ): Promise<WorkflowResult> {
-	const { workspaceId } = ctx;
-	// A repair replaces the manifest. Read the spec from here, not from ctx.
-	let spec = ctx.spec;
-	const names = resourceNames(spec);
-	const wanted = [...names.services.values()];
+	const names = resourceNames(ctx.spec);
 	const heartbeat = runHeartbeat(ctx.runId);
 
 	// An error is not caught. awaiting_blueprint tells the user to create a
@@ -86,31 +102,59 @@ export async function awaitDeployment(
 	// tries a failed request again, and an error that stays ends the run with
 	// that error as its summary.
 	const blueprint = await findBlueprint({
-		workspaceId,
+		workspaceId: ctx.workspaceId,
 		repo: ctx.repoUrl,
 		branch: factoryConfig.branch,
 		path: factoryConfig.blueprintPath,
 	});
-	if (!blueprint) {
-		return {
-			status: "awaiting_blueprint",
-			user: spec.user,
-			appName: spec.appName,
-			summary: [
-				ctx.summary,
-				`Committed to ${ctx.repoUrl} on ${factoryConfig.branch}, but no Blueprint in workspace ${workspaceId} is watching ${factoryConfig.blueprintPath}.`,
-				"Create one once in that workspace in the Render Dashboard (New > Blueprint) and every later run deploys on push.",
-			].join("\n\n"),
-		};
-	}
+	if (!blueprint) return awaitingBlueprint(ctx);
 
+	const services = await waitForAppServices(ctx, blueprint, names, heartbeat);
+	if ("end" in services) return services.end;
+
+	const deployed = await deployWithRepairs(
+		ctx,
+		names,
+		services.value,
+		heartbeat,
+	);
+	if ("end" in deployed) return deployed.end;
+
+	return smokeTest(
+		ctx,
+		{ spec: deployed.value, names, services: services.value, blueprint },
+		heartbeat,
+	);
+}
+
+function awaitingBlueprint(ctx: DeployContext): WorkflowResult {
+	return {
+		status: "awaiting_blueprint",
+		user: ctx.spec.user,
+		appName: ctx.spec.appName,
+		summary: [
+			ctx.summary,
+			`Committed to ${ctx.repoUrl} on ${factoryConfig.branch}, but no Blueprint in workspace ${ctx.workspaceId} is watching ${factoryConfig.blueprintPath}.`,
+			"Create one once in that workspace in the Render Dashboard (New > Blueprint) and every later run deploys on push.",
+		].join("\n\n"),
+	};
+}
+
+/** Wait for the Blueprint sync to create every service of the app. */
+async function waitForAppServices(
+	ctx: DeployContext,
+	blueprint: BlueprintRecord,
+	names: ResourceNames,
+	heartbeat: (detail: string) => Promise<void>,
+): Promise<Step<AppServices>> {
+	const wanted = [...names.services.values()];
 	await setRunStage(
 		ctx.runId,
 		"waiting_for_services",
 		`Waiting for ${wanted.length} Blueprint service(s)`,
 	);
 	const services = await waitForServices(
-		workspaceId,
+		ctx.workspaceId,
 		wanted,
 		SERVICE_TIMEOUT_MS,
 		heartbeat,
@@ -118,51 +162,47 @@ export async function awaitDeployment(
 	if (services.size < wanted.length) {
 		const missing = wanted.filter((name) => !services.has(name));
 		return {
-			status: "deploy_failed",
-			summary: [
-				`Blueprint ${blueprint.id} did not produce ${missing.join(", ")} within ${SERVICE_TIMEOUT_MS / 60000} minutes.`,
-				blueprint.autoSync
-					? `Blueprint status is "${blueprint.status}".`
-					: "Auto Sync is off for this Blueprint, so the push did not sync. Turn it on or sync manually.",
-			].join(" "),
+			end: {
+				status: "deploy_failed",
+				summary: [
+					`Blueprint ${blueprint.id} did not produce ${missing.join(", ")} within ${SERVICE_TIMEOUT_MS / 60000} minutes.`,
+					blueprint.autoSync
+						? `Blueprint status is "${blueprint.status}".`
+						: "Auto Sync is off for this Blueprint, so the push did not sync. Turn it on or sync manually.",
+				].join(" "),
+			},
 		};
 	}
 
-	const urlOf = (name: string | null): string | null =>
-		name ? (services.get(name)?.url ?? null) : null;
-
 	await setRunUrls(ctx.runId, {
-		webUrl: urlOf(names.web),
-		apiUrl: urlOf(names.api),
+		webUrl: urlOf(services, names.web),
+		apiUrl: urlOf(services, names.api),
 	});
+	return { value: services };
+}
 
-	// ── Deploy-manager loop ─────────────────────────────────────────────
-	// The first round waits for every service. A repair round waits only for
-	// the services that failed. A live service that the repair did not change
-	// gets no new deploy, so it keeps its live deploy.
-	let waits: DeployWait[] = [...services.values()].map((service) => ({
-		service,
-		after: null,
-	}));
-	for (let round = 0; round <= MAX_DEPLOY_REPAIR_ROUNDS; round++) {
-		await setRunStage(
-			ctx.runId,
-			"waiting_for_deploys",
-			`Waiting for ${waits.length} deploy(s), round ${round + 1}`,
-		);
-		const outcomes = await Promise.all(
-			waits.map(async ({ service, after }) => ({
-				service,
-				deploy: await waitForDeploy(service.id, {
-					timeoutMs: DEPLOY_TIMEOUT_MS,
-					after,
-					onPoll: (detail) => heartbeat(`${service.name}: ${detail}`),
-				}),
-			})),
-		);
-
-		const failed = outcomes.filter(({ deploy }) => deploy.result !== "live");
-		if (failed.length === 0) break;
+/**
+ * Wait for the deploys of the push, and repair the deploys that fail, up to
+ * MAX_DEPLOY_REPAIR_ROUNDS times. Gives the spec that is live: a repair
+ * replaces the manifest. Each repair round:
+ * 1. reads the logs of each failed deploy. The deploy-manager agent
+ *    diagnoses the failures from these logs
+ * 2. the builder fixes what the deploy manager diagnosed
+ * 3. verify-app verifies the repair. publish-app rewrites factory.json and
+ *    the Blueprints from the repaired manifest, and pushes
+ * 4. the next round waits for a new deploy of each service that failed
+ */
+async function deployWithRepairs(
+	ctx: DeployContext,
+	names: ResourceNames,
+	services: AppServices,
+	heartbeat: (detail: string) => Promise<void>,
+): Promise<Step<AppSpec>> {
+	let spec = ctx.spec;
+	let waits = firstWaits(ctx, names, services);
+	for (let round = 0; ; round++) {
+		const failed = await waitForDeploys(ctx.runId, waits, round, heartbeat);
+		if (failed.length === 0) return { value: spec };
 
 		// Another round cannot repair a service that the push did not deploy
 		// again. The deploy manager reads the same failed deploy.
@@ -170,117 +210,224 @@ export async function awaitDeployment(
 			round === MAX_DEPLOY_REPAIR_ROUNDS ||
 			failed.some(({ deploy }) => deploy.result === "not_started")
 		) {
-			return { status: "deploy_failed", summary: deployFailures(failed) };
-		}
-
-		// The deploy manager diagnoses the failures from the logs of each
-		// failed deploy. No agent can read logs, so workflow code reads them.
-		const reports = await Promise.all(
-			failed.map((failure) => failedDeployReport(workspaceId, failure)),
-		);
-		const diagnosis = await agentJson(
-			(message) => ctx.tasks.run(deployManagerTask, { message }),
-			deployDiagnosisSchema,
-			[
-				`Workspace: ${workspaceId}`,
-				"",
-				"The following services failed to deploy:",
-				"",
-				reports.join("\n\n"),
-				"",
-				"Diagnose exactly what went wrong. Quote the exact error from the logs.",
-			].join("\n"),
-			`deploy-manager-${round + 1}`,
-		);
-
-		if (diagnosis.allHealthy || diagnosis.failures.length === 0) break;
-
-		// Hand the diagnosis to the builder to fix.
-		const diagnosisText = diagnosis.failures
-			.map(
-				(f) =>
-					`--- ${f.serviceName} (${f.status}) ---\n${f.diagnosis}${f.logs ? `\n\nLogs:\n${f.logs}` : ""}`,
-			)
-			.join("\n\n");
-
-		const buildOutput = await runBuilder(
-			ctx.tasks,
-			ctx.sandbox,
-			ctx.appDir,
-			[
-				"The app built and passed verification in the sandbox, but Render's deploy failed.",
-				"The deploy manager diagnosed these issues:",
-				"",
-				diagnosisText,
-				"",
-				"Fix exactly what the diagnosis names.",
-				"Keep the same services and databases in the manifest. Do not add, remove, or rename one, and do not change the kind of a service.",
-			].join("\n"),
-			`builder-deploy-fix-${round + 1}`,
-		);
-
-		// The repaired manifest must keep every resource, because `names` and
-		// `services` above describe them. The rest of the spec stays:
-		// resourcePrefix is in each resource name.
-		const repaired: AppSpec = { ...spec, manifest: buildOutput.manifest };
-		const rejection = resourceChange(spec, repaired);
-		if (rejection) {
 			return {
-				status: "deploy_failed",
-				summary: `Deploy repair round ${round + 1} was not pushed. ${rejection}`,
+				end: { status: "deploy_failed", summary: deployFailures(failed, round) },
 			};
 		}
 
-		const { failures } = await ctx.tasks.run(verifyAppTask, {
-			sandboxId: ctx.sandbox.id,
-			user: spec.user,
-			appName: spec.appName,
-			manifest: repaired.manifest,
-			databaseUrl: ctx.databaseUrl,
-		});
-		if (failures.length > 0) {
-			return {
-				status: "deploy_failed",
-				summary: `Deploy repair round ${round + 1} failed local verification: ${failures.join("; ").slice(0, 1_000)}`,
-			};
-		}
-
-		// Render deploys from the root Blueprint, which comes from each
-		// factory.json. If these files keep the old manifest, Render keeps the
-		// old commands, paths, and env vars.
-		spec = repaired;
-		const { commit } = await ctx.tasks.run(publishAppTask, {
-			sandboxId: ctx.sandbox.id,
-			spec,
-			message: `Fix Render deploy for ${spec.user}/${spec.appName} (round ${round + 1})`,
-		});
-		// With no commit, Render deploys nothing, and the failed deploys stay.
-		// Render keeps the last live deploy of a failed service, so the smoke
-		// checks can pass against the old code.
-		if (!commit) {
-			return {
-				status: "deploy_failed",
-				summary: `Deploy repair round ${round + 1} changed no files, so Render has no new commit to deploy. ${deployFailures(failed)}`,
-			};
-		}
+		const repaired = await repairDeploys(ctx, spec, failed, round);
+		if ("end" in repaired) return repaired;
+		spec = repaired.value;
 
 		// Right after the push, the newest deploy of each failed service is
-		// still the deploy that failed.
+		// still the deploy that failed. A live service that the repair did not
+		// change gets no new deploy, so it keeps its live deploy.
 		waits = failed.map(({ service, deploy }) => ({
 			service,
 			after: deploy.deployId,
 		}));
 	}
+}
 
-	// ── Smoke the real thing ────────────────────────────────────────────
+/** A service to wait for after a push. */
+interface DeployWait {
+	service: ServiceRecord;
+	/** The deploy from before the push, or null. See waitForDeploy(). */
+	after: string | null;
+}
+
+/** A service, and the deploy that it ended its wait with. */
+interface DeployResult {
+	service: ServiceRecord;
+	deploy: DeployOutcome;
+}
+
+/**
+ * The first round waits for every service. A service that existed before the
+ * push and whose files the push changed waits for a deploy newer than its
+ * newest deploy from before the push. Render does not deploy a service whose
+ * files did not change again, so its newest deploy is its result.
+ */
+function firstWaits(
+	ctx: DeployContext,
+	names: ResourceNames,
+	services: AppServices,
+): DeployWait[] {
+	const changed = new Set(
+		ctx.changedServices.map((name) => names.services.get(name)),
+	);
+	return [...services.values()].map((service) => ({
+		service,
+		after: changed.has(service.name)
+			? (ctx.deploysBefore.get(service.name) ?? null)
+			: null,
+	}));
+}
+
+/** Wait for each deploy, and give the deploys that are not live. */
+async function waitForDeploys(
+	runId: string,
+	waits: readonly DeployWait[],
+	round: number,
+	heartbeat: (detail: string) => Promise<void>,
+): Promise<DeployResult[]> {
+	await setRunStage(
+		runId,
+		"waiting_for_deploys",
+		`Waiting for ${waits.length} deploy(s), round ${round + 1}`,
+	);
+	const outcomes = await Promise.all(
+		waits.map(async ({ service, after }) => ({
+			service,
+			deploy: await waitForDeploy(service.id, {
+				timeoutMs: DEPLOY_TIMEOUT_MS,
+				after,
+				onPoll: (detail) => heartbeat(`${service.name}: ${detail}`),
+			}),
+		})),
+	);
+	return outcomes.filter(({ deploy }) => deploy.result !== "live");
+}
+
+/**
+ * One repair round: the deploy manager diagnoses the failed deploys, the
+ * builder fixes them, verify-app verifies the fix, and publish-app pushes it.
+ * Gives the repaired spec.
+ */
+async function repairDeploys(
+	ctx: DeployContext,
+	spec: AppSpec,
+	failed: readonly DeployResult[],
+	round: number,
+): Promise<Step<AppSpec>> {
+	// No agent can read logs, so workflow code reads them.
+	const reports = await Promise.all(
+		failed.map((failure) => failedDeployReport(ctx.workspaceId, failure)),
+	);
+	const diagnosis = await agentJson(
+		(message) => ctx.tasks.run(deployManagerTask, { message }),
+		deployDiagnosisSchema,
+		[
+			`Workspace: ${ctx.workspaceId}`,
+			"",
+			"The following services failed to deploy:",
+			"",
+			reports.join("\n\n"),
+			"",
+			"Diagnose exactly what went wrong. Quote the exact error from the logs.",
+		].join("\n"),
+		`deploy-manager-${round + 1}`,
+	);
+	// Render reported these deploys failed, so a diagnosis with nothing to fix
+	// cannot send the run to the smoke checks.
+	if (diagnosis.failures.length === 0) {
+		return {
+			end: {
+				status: "deploy_failed",
+				summary: `The deploy manager diagnosed no failure to repair in round ${round + 1}. ${deployFailures(failed, round)}`,
+			},
+		};
+	}
+
+	const diagnosisText = diagnosis.failures
+		.map(
+			(f) =>
+				`--- ${f.serviceName} (${f.status}) ---\n${f.diagnosis}${f.logs ? `\n\nLogs:\n${f.logs}` : ""}`,
+		)
+		.join("\n\n");
+	const buildOutput = await runBuilder(
+		ctx.tasks,
+		ctx.sandbox,
+		ctx.appDir,
+		[
+			"The app built and passed verification in the sandbox, but Render's deploy failed.",
+			"The deploy manager diagnosed these issues:",
+			"",
+			diagnosisText,
+			"",
+			"Fix exactly what the diagnosis names.",
+			"Keep the same services and databases in the manifest. Do not add, remove, or rename one, and do not change the kind of a service.",
+		].join("\n"),
+		`builder-deploy-fix-${round + 1}`,
+	);
+
+	// The repaired manifest must keep every resource, because the services
+	// that the deploy waits for come from the first push. The rest of the
+	// spec stays: resourcePrefix is in each resource name.
+	const repaired: AppSpec = { ...spec, manifest: buildOutput.manifest };
+	const rejection = resourceChange(spec, repaired);
+	if (rejection) {
+		return {
+			end: {
+				status: "deploy_failed",
+				summary: `Deploy repair round ${round + 1} was not pushed. ${rejection}`,
+			},
+		};
+	}
+
+	const { failures } = await ctx.tasks.run(verifyAppTask, {
+		sandboxId: ctx.sandbox.id,
+		user: repaired.user,
+		appName: repaired.appName,
+		manifest: repaired.manifest,
+		databaseUrl: ctx.databaseUrl,
+	});
+	if (failures.length > 0) {
+		return {
+			end: {
+				status: "deploy_failed",
+				summary: `Deploy repair round ${round + 1} failed local verification: ${failures.join("; ").slice(0, 1_000)}`,
+			},
+		};
+	}
+
+	// Render deploys from the root Blueprint, which comes from each
+	// factory.json. If these files keep the old manifest, Render keeps the
+	// old commands, paths, and env vars.
+	const { commit } = await ctx.tasks.run(publishAppTask, {
+		sandboxId: ctx.sandbox.id,
+		spec: repaired,
+		message: `Fix Render deploy for ${repaired.user}/${repaired.appName} (round ${round + 1})`,
+	});
+	// With no commit, Render deploys nothing, and the failed deploys stay.
+	// Render keeps the last live deploy of a failed service, so the smoke
+	// checks can pass against the old code.
+	if (!commit) {
+		return {
+			end: {
+				status: "deploy_failed",
+				summary: `Deploy repair round ${round + 1} changed no files, so Render has no new commit to deploy. ${deployFailures(failed, round)}`,
+			},
+		};
+	}
+	return { value: repaired };
+}
+
+/**
+ * The checks that a deploy status cannot make: each public URL answers, the
+ * storefront names the public hostname of the API, and the API gives data
+ * that the storefront's origin can read.
+ */
+async function smokeTest(
+	ctx: DeployContext,
+	app: {
+		spec: AppSpec;
+		names: ResourceNames;
+		services: AppServices;
+		blueprint: BlueprintRecord;
+	},
+	heartbeat: (detail: string) => Promise<void>,
+): Promise<WorkflowResult> {
+	const { spec, names, services, blueprint } = app;
 	await setRunStage(
 		ctx.runId,
 		"smoke_testing",
 		"Deploys are live. The workflow checks public URLs, the API host in the storefront, data, and CORS",
 	);
-	const apiUrl = urlOf(names.api);
+	const storefrontUrl = urlOf(services, names.web);
+	const apiUrl = urlOf(services, names.api);
 	// An API-only app has no storefront, so the API is the public URL.
-	const webUrl = urlOf(names.web) ?? apiUrl;
+	const webUrl = storefrontUrl ?? apiUrl;
 	if (!webUrl) {
 		return {
 			status: "deploy_failed",
@@ -303,8 +450,8 @@ export async function awaitDeployment(
 	);
 	if (apiUrl && apiService) {
 		const failure =
-			(await smokeStorefront(urlOf(names.web), apiUrl)) ??
-			(await smokeApi(apiUrl, apiService, urlOf(names.web), heartbeat));
+			(await smokeStorefront(storefrontUrl, apiUrl)) ??
+			(await smokeApi(apiUrl, apiService, storefrontUrl, heartbeat));
 		if (failure) {
 			return {
 				status: "deploy_failed",
@@ -323,24 +470,24 @@ export async function awaitDeployment(
 		apiUrl,
 		summary: [
 			ctx.summary,
-			`Deployed ${[...services.values()].length} service(s)${hasDb ? " and a Postgres database" : ""} from ${factoryConfig.blueprintPath} (Blueprint ${blueprint.id}).`,
+			`Deployed ${services.size} service(s)${hasDb ? " and a Postgres database" : ""} from ${factoryConfig.blueprintPath} (Blueprint ${blueprint.id}).`,
 		].join("\n\n"),
 	};
 }
 
-/** A service to wait for after a push. */
-interface DeployWait {
-	service: ServiceRecord;
-	/** The deploy from before the push, or null. See waitForDeploy(). */
-	after: string | null;
+function urlOf(services: AppServices, name: string | null): string | null {
+	return name ? (services.get(name)?.url ?? null) : null;
 }
 
+/** Round 0 waits for the first push, and each later round for a repair. */
 function deployFailures(
-	failed: readonly { service: ServiceRecord; deploy: DeployOutcome }[],
+	failed: readonly DeployResult[],
+	round: number,
 ): string {
+	const push = round === 0 ? "the push" : "the repair push";
 	const lines = failed.map(({ service, deploy }) =>
 		deploy.result === "not_started"
-			? `${service.name}: the repair push did not start a new deploy in ${DEPLOY_TIMEOUT_MS / 60000} minutes. ` +
+			? `${service.name}: ${push} did not start a new deploy in ${DEPLOY_TIMEOUT_MS / 60000} minutes. ` +
 				`The newest deploy is still ${deploy.deployId} ("${deploy.status}").`
 			: `${service.name} ended as "${deploy.status}".`,
 	);
@@ -358,7 +505,7 @@ function deployFailures(
  */
 async function failedDeployReport(
 	workspaceId: string,
-	{ service, deploy }: { service: ServiceRecord; deploy: DeployOutcome },
+	{ service, deploy }: DeployResult,
 ): Promise<string> {
 	const logs = deploy.deployId
 		? redactSecrets(
