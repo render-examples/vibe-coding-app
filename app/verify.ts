@@ -43,7 +43,7 @@ export const verifyAppTask = task(
 	{
 		name: "verify-app",
 		// The builds run in the sandbox, not on the compute of this task.
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: VERIFY_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},

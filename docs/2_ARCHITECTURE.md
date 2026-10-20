@@ -328,13 +328,15 @@ interface Agent {
   tools?: readonly Tool[];
   renderTools?: readonly string[];
   maxTurns?: number;
+  timeoutSeconds: number;
   plan?: string;
 }
 ```
 
 `agentTask()` in `app/agents.ts` turns that definition into a Render task. It
 binds a workflow-selected Sandbox and working directory when needed, calls
-`runClaude()`, logs token usage, and returns structured output.
+`runClaude()`, logs token usage, and returns structured output. Every agent
+task has an explicit deadline and disables automatic task retries.
 
 `runClaude()` is the model boundary. It disables built-in shell and file
 tools, forwards an environment allowlist, exposes only explicitly selected
@@ -360,7 +362,9 @@ Workflow code binds the context; the model supplies only validated tool
 input. File tools resolve paths inside `workDir` or `/tmp`.
 
 The builder receives read, write, list, search, exec, and patch tools. The
-architect and deploy manager receive no Sandbox tools.
+architect and deploy manager receive no Sandbox tools. Builder shell commands
+have their own 10-minute limit, shorter than the builder task and parent
+workflow deadlines.
 
 ### `DeployPlan`, `Manifest`, and `AppSpec`
 

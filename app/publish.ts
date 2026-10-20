@@ -60,7 +60,7 @@ const PUBLISH_TIMEOUT_SECONDS = 10 * 60;
 export const publishAppTask = task(
 	{
 		name: "publish-app",
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: PUBLISH_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},

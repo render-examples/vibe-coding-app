@@ -269,7 +269,9 @@ one.
   but they cannot limit a shell command. The next invariant does that.
 - `checkToolCall()` does not inspect shell commands. A pattern cannot tell a
   safe command from a harmful one; the sandbox's contents limit what a command
-  can reach.
+  can reach. `sandbox__exec` still bounds every command to 10 minutes so a
+  foreground development server cannot hold a run slot for the parent's full
+  two-hour deadline.
 - `sandboxId` and `workDir` come from workflow code, never from a model.
 - Structured agent output is validated with Zod and fails closed after one
   repair attempt (`agentJson()`).
@@ -381,8 +383,9 @@ A transient fault is not a reason to retry the whole run. Retry the one call
 that failed, with a limit, as `pushVerified()` does when another run pushed
 first: the clone takes the new tip, and the push's change is made again. Each
 change the factory makes is derived from its inputs, so it is never merged.
-Agent subtasks keep the default retries: the parent waits for each one, so
-the row stays `running` and inside the concurrency limit.
+Agent subtasks also set `maxRetries: 0` and an explicit deadline. A model
+failure or timeout returns to the parent once instead of repeating expensive
+tool calls while the row holds a concurrency slot.
 
 `verify-app` and `publish-app` set `maxRetries: 0`, so a failure fails the
 run. A retry of `publish-app` after its push would find nothing to commit, and
@@ -419,10 +422,10 @@ the next step would not wait for the push event. A retry of
 
 ## Add an agent
 
-1. Add it to `app/agents.ts`. `id`, `model`, and `prompt` are required. `id`
-   is also the registered task name, so keep it unique and stable. Give it
-   `tools` only if it needs the sandbox, and `renderTools` only from
-   `RENDER_READ_ONLY_TOOLS`.
+1. Add it to `app/agents.ts`. `id`, `model`, `prompt`, and
+   `timeoutSeconds` are required. `id` is also the registered task name, so
+   keep it unique and stable. Give it `tools` only if it needs the sandbox,
+   and `renderTools` only from `RENDER_READ_ONLY_TOOLS`.
 2. Wrap it with `agentTask()` at the bottom of `app/agents.ts`, beside the
    other registrations.
 3. Call it from the stage that needs it, in `app/workflow.ts` or a stage

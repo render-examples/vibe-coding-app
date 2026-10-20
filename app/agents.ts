@@ -19,7 +19,8 @@ export const architect: Agent = {
 	// tools are read-only views of the Render workspace it designs for.
 	renderTools: RENDER_READ_ONLY_TOOLS,
 	maxTurns: 12,
-	plan: "standard",
+	timeoutSeconds: 15 * 60,
+	plan: "flex",
 	prompt: md`
 		You are the architect. You receive one product prompt — the kind a
 		customer types into a vibe-coding box — and you decide what to build and
@@ -92,7 +93,8 @@ export const builder: Agent = {
 	effort: "low",
 	tools: sandboxTools,
 	maxTurns: 80,
-	plan: "standard",
+	timeoutSeconds: 60 * 60,
+	plan: "flex",
 	prompt: md`
 		You are the builder. You receive a product prompt, an approved
 		infrastructure plan, and an empty app directory inside a sandbox.
@@ -201,7 +203,8 @@ export const deployManager: Agent = {
 	effort: "low",
 	renderTools: RENDER_READ_ONLY_TOOLS,
 	maxTurns: 20,
-	plan: "standard",
+	timeoutSeconds: 15 * 60,
+	plan: "flex",
 	prompt: md`
 		You are the deploy manager. You diagnose Render deploys that failed.
 
@@ -256,7 +259,14 @@ const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
  */
 export function agentTask(agent: Agent) {
 	return task(
-		{ name: agent.id, plan: agent.plan },
+		{
+			name: agent.id,
+			plan: agent.plan,
+			timeoutSeconds: agent.timeoutSeconds,
+			// A timeout or model failure should return to the parent once. Repeating
+			// an expensive agent task can repeat shell commands and hold a run slot.
+			retry: { maxRetries: 0, waitDurationMs: 0 },
+		},
 		async function runAgent(
 			_tasks: TaskContext,
 			input: AgentTaskInput,

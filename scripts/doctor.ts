@@ -20,6 +20,9 @@ import { db } from "../app/store.js";
 import { exitWith, type Finding, heading, print } from "./support.js";
 
 const API = process.env.GITHUB_API_URL ?? "https://api.github.com";
+const ANTHROPIC_API = (
+	process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com"
+).replace(/\/+$/, "");
 const findings: Finding[] = [];
 
 function record(finding: Finding): void {
@@ -116,6 +119,46 @@ function checkConfiguration(): void {
 			message: "No GitHub credentials",
 			fix: "Set GITHUB_TOKEN, or the GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY / GITHUB_APP_INSTALLATION_ID trio.",
 		});
+	}
+}
+
+async function checkModels(): Promise<void> {
+	heading("Models");
+
+	const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+	if (!apiKey) {
+		record({ level: "warn", message: "Skipped — ANTHROPIC_API_KEY is not set" });
+		return;
+	}
+
+	for (const model of new Set(Object.values(factoryConfig.models))) {
+		try {
+			const response = await fetch(
+				`${ANTHROPIC_API}/v1/models/${encodeURIComponent(model)}`,
+				{
+					headers: {
+						"x-api-key": apiKey,
+						"anthropic-version": "2023-06-01",
+					},
+					signal: AbortSignal.timeout(15_000),
+				},
+			);
+			record(
+				response.ok
+					? { level: "ok", message: `Anthropic model ${model} is available` }
+					: {
+							level: "fail",
+							message: `Anthropic model ${model} is unavailable (HTTP ${response.status})`,
+							fix: "Choose a model ID returned by GET /v1/models and update factory.config.ts.",
+						},
+			);
+		} catch (error) {
+			record({
+				level: "fail",
+				message: `Could not check Anthropic model ${model}`,
+				fix: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 }
 
@@ -408,6 +451,7 @@ async function checkTasks(): Promise<void> {
 }
 
 checkConfiguration();
+await checkModels();
 await checkGitHub();
 await checkBlueprint();
 await checkRenderMcp();

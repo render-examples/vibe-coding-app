@@ -93,6 +93,33 @@ export type DeployPlan = z.infer<typeof deployPlanSchema>;
 
 /* ── Service manifest ──────────────────────────────────────────────────── */
 
+const relativePath = z
+	.string()
+	.min(1)
+	.max(120)
+	.regex(
+		/^[A-Za-z0-9._/-]+$/,
+		"must contain only letters, numbers, dots, underscores, hyphens, and slashes",
+	)
+	.refine((path) => !/[\r\n]/.test(path), "must stay on one line")
+	.refine(
+		(path) =>
+			path === "." ||
+			(!path.startsWith("/") &&
+				path
+					.split("/")
+					.every(
+						(segment) => segment !== "" && segment !== "." && segment !== "..",
+					)),
+		"must be a plain relative path with no . or .. segments",
+	);
+
+const endpointPath = z
+	.string()
+	.max(120)
+	.regex(/^\/[\w./-]*$/, "must be an absolute URL path")
+	.refine((path) => !/[\r\n]/.test(path), "must stay on one line");
+
 /**
  * The builder declares what it built. Each service becomes a Blueprint entry
  * and drives the verification the workflow runs before pushing.
@@ -101,7 +128,7 @@ export const serviceSchema = z.object({
 	name: z.string().min(1).max(60),
 	kind: z.enum(["static_site", "web_service"]),
 	/** Directory relative to the app root, e.g. "web" or "api". */
-	rootDir: z.string().min(1).max(120),
+	rootDir: relativePath,
 	runtime: z.enum(["node", "static"]).default("node"),
 	buildCommand: z.string().min(1).max(500),
 	startCommand: z.string().max(500).optional(),
@@ -112,14 +139,14 @@ export const serviceSchema = z.object({
 	 * on every deploy, including redeploys of an unchanged commit.
 	 */
 	preDeployCommand: z.string().max(500).optional(),
-	staticPublishPath: z.string().max(120).optional(),
-	healthCheckPath: z.string().max(120).optional(),
+	staticPublishPath: relativePath.optional(),
+	healthCheckPath: endpointPath.optional(),
 	/**
 	 * An endpoint that reads the database. `healthCheckPath` deliberately does
 	 * not, so without this nothing — locally or in production — ever proves the
 	 * schema was applied, the seed loaded, or `DATABASE_URL` was wired.
 	 */
-	dataCheckPath: z.string().max(120).optional(),
+	dataCheckPath: endpointPath.optional(),
 	envVars: z
 		.array(
 			z.object({

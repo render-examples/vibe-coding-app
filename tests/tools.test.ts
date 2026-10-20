@@ -8,7 +8,6 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ExecResult, type Sandbox, shellEscape } from "../app/sandbox.js";
@@ -16,6 +15,7 @@ import {
 	MAX_OUTPUT_CHARS,
 	sandboxApplyPatch,
 	sandboxExec,
+	sandboxExecTool,
 	sandboxWriteFile,
 	type ToolContext,
 } from "../app/tools.js";
@@ -28,10 +28,25 @@ const env = Object.fromEntries(
 	Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
 );
 
-/** A sandbox that runs each command in a real shell on this machine. */
-function localSandbox() {
+/**
+ * A sandbox that runs each command in a real shell on this machine. macOS has
+ * no coreutils `timeout`, so the fake unwraps it and can simulate its 124 exit.
+ */
+function localSandbox(timedOutCommand?: string) {
 	const uploaded: string[] = [];
-	const run = async (command: string): Promise<ExecResult> => {
+	const commands: string[] = [];
+	const run = async (wrapped: string): Promise<ExecResult> => {
+		commands.push(wrapped);
+		if (
+			timedOutCommand &&
+			wrapped.includes(`sh -c ${shellEscape(timedOutCommand)}`)
+		) {
+			return { output: "", exitCode: 124 };
+		}
+		const command = wrapped.replace(
+			/timeout --signal=TERM --kill-after=5s [0-9.]+s sh -c /,
+			"sh -c ",
+		);
 		try {
 			return {
 				output: execSync(command, { encoding: "utf8", env, stdio: "pipe" }),
@@ -60,7 +75,7 @@ function localSandbox() {
 			writeFileSync(path, data);
 		},
 	} as unknown as Sandbox;
-	return { sandbox, uploaded };
+	return { sandbox, uploaded, commands };
 }
 
 describe("sandbox tools", () => {
@@ -73,13 +88,19 @@ describe("sandbox tools", () => {
 	});
 
 	/** An app directory inside a parent that stands for the apps repository. */
-	function context(): ToolContext & { uploaded: string[]; repo: string } {
-		const repo = realpathSync(mkdtempSync(join(tmpdir(), "tools-test-")));
+	function context(
+		timedOutCommand?: string,
+	): ToolContext & { uploaded: string[]; commands: string[]; repo: string } {
+		// Keep this outside /tmp. The tool deliberately permits /tmp as scratch,
+		// so a repository created there cannot test an absolute path escape.
+		const repo = realpathSync(
+			mkdtempSync(join(dirname(process.cwd()), ".tools-test-")),
+		);
 		temporary.push(repo);
 		const workDir = join(repo, "apps/demo/shop");
 		mkdirSync(workDir, { recursive: true });
-		const { sandbox, uploaded } = localSandbox();
-		return { sandbox, workDir, uploaded, repo };
+		const { sandbox, uploaded, commands } = localSandbox(timedOutCommand);
+		return { sandbox, workDir, uploaded, commands, repo };
 	}
 
 	it("resolves a relative path against the app directory and rejects a path outside it and /tmp", async () => {
@@ -123,6 +144,26 @@ describe("sandbox tools", () => {
 		expect(failed.isError).toBe(true);
 		expect(failed.content).toContain("Exit code: 3");
 		expect(failed.content).toContain("1 failing");
+	});
+
+	it("terminates a sandbox__exec command that does not exit", async () => {
+		const ctx = context("sleep 10");
+		const execWithShortTimeout = sandboxExecTool(0.05);
+
+		const started = Date.now();
+		const timedOut = await execWithShortTimeout.invoke(
+			{ command: "sleep 10" },
+			ctx,
+		);
+
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(ctx.commands[0]).toContain(
+			"timeout --signal=TERM --kill-after=5s 0.05s sh -c",
+		);
+		expect(timedOut).toEqual({
+			content: "Command timed out after 0.05 seconds.",
+			isError: true,
+		});
 	});
 
 	it("applies a patch with sandbox__apply_patch and removes the patch file whether it applies or not", async () => {

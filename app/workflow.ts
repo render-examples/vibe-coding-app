@@ -59,7 +59,7 @@ const DELETE_TIMEOUT_SECONDS = 4 * DELETE_STEP_TIMEOUT_SECONDS;
 export const promptToApp = task(
 	{
 		name: "prompt-to-app",
-		plan: "standard",
+		plan: "flex",
 		timeoutSeconds: SANDBOX_TIMEOUT_SECONDS,
 		// Render Workflows retries a failed run three times by default. A retry
 		// starts again at the architect with a new sandbox, and after a push it
@@ -260,7 +260,7 @@ interface DeleteResult {
 export const deleteApp = task(
 	{
 		name: "delete-app",
-		plan: "starter",
+		plan: "flex",
 		timeoutSeconds: DELETE_TIMEOUT_SECONDS,
 		retry: { maxRetries: 0, waitDurationMs: 0 },
 	},

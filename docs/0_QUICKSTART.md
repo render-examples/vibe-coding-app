@@ -17,7 +17,8 @@ You need:
 - Node.js 22 or later and Docker.
 - The [Render CLI](https://render.com/docs/cli), signed in with
   `render login`.
-- A Render workspace with Workflows and Sandboxes enabled.
+- A Render workspace with Workflows and
+  [Sandboxes early access](https://render.com/docs/sandboxes) enabled.
 - A Render API key and that workspace's ID (`tea-...`).
 - An Anthropic API key.
 - An empty GitHub repository for generated apps (the **apps repository**).
@@ -149,8 +150,9 @@ The factory's [`render.yaml`](../render.yaml) creates:
 - `vibe-factory-db`, the Postgres database shared by both.
 
 Create a Blueprint from this repository or use the Deploy to Render button in
-the [README](../README.md). Fill in the prompted values from your local
-`.env`.
+the [README](../README.md). Fill in the prompted values listed under
+[Prerequisites](#prerequisites). `UI_PASSWORD` must contain at least 16
+characters or the gateway will refuse to start.
 
 If you deploy a fork, first change the workflow service's `repo:` field in
 `render.yaml` to the fork URL. Otherwise Render builds the upstream workflow
@@ -175,16 +177,38 @@ FACTORY_GATEWAY_URL=https://<gateway>.onrender.com \
 
 ## Verify the wiring
 
-Run:
+First run the code checks:
+
+```bash
+npm run check
+```
+
+To run the doctor against a factory deployed with the Deploy to Render button,
+create a local `.env` from the deployed resources:
+
+1. Copy `.env.example` to `.env`.
+2. From `vibe-factory-gateway`, copy `FACTORY_API_KEY`, `UI_USERNAME`,
+   `UI_PASSWORD`, and `RENDER_WORKFLOW_SLUG`.
+3. From `vibe-factory-workflows`, copy `APPS_REPO`, `RENDER_API_KEY`,
+   `RENDER_WORKSPACE_ID`, `ANTHROPIC_API_KEY`, and either `GITHUB_TOKEN` or
+   the three `GITHUB_APP_*` values.
+4. Open `vibe-factory-db` in the Dashboard and copy its **external**
+   connection URL. Set that as `DATABASE_URL` and append
+   `?sslmode=require` (or `&sslmode=require` when the URL already has a
+   query). The internal URL is not reachable from your laptop.
+
+Then run:
 
 ```bash
 npm run doctor
-npm run check
 ```
+
+Keep this `.env` private; it contains production credentials.
 
 `npm run doctor` is read-only. It checks:
 
 - required configuration and credential shape;
+- that the configured Anthropic model IDs are available;
 - GitHub read and push access and the default branch;
 - the apps Blueprint's repository, path, branch, and Auto Sync setting;
 - the Render MCP server and the agents' read-only tool allowlist;

@@ -47,7 +47,7 @@ export const factoryConfig: FactoryConfig = {
 	blueprintPath: "render.yaml",
 	render: {
 		region: "oregon",
-		servicePlan: "starter",
+		servicePlan: "0.5c-512mb",
 		databasePlan: "0.1c-256mb",
 		postgresMajorVersion: "18",
 	},

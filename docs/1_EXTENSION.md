@@ -69,7 +69,7 @@ independently observable task. Deterministic work belongs in normal workflow
 code.
 
 1. Define an `Agent` in [`app/agents.ts`](../app/agents.ts) with a stable,
-   unique `id`, a model tier, and a prompt.
+   unique `id`, a model tier, a prompt, and an explicit `timeoutSeconds`.
 2. Grant `tools` only when the agent must act in the build Sandbox. Grant
    `renderTools` only from `RENDER_READ_ONLY_TOOLS`.
 3. Register it with `agentTask()` at the bottom of `app/agents.ts`.
@@ -256,7 +256,7 @@ The gateway requires:
 - `RENDER_WORKFLOW_SLUG`
 - `FACTORY_API_KEY`
 - `UI_USERNAME`
-- `UI_PASSWORD`
+- `UI_PASSWORD` (at least 16 characters)
 
 The workflows host requires:
 

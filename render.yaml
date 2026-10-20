@@ -15,13 +15,13 @@ projects:
 
         databases:
           - name: vibe-factory-db
-            plan: basic-256mb
+            plan: 0.1c-256mb
 
         services:
           - type: web
             name: vibe-factory-gateway
             runtime: docker
-            plan: starter
+            plan: 0.5c-512mb
             # Applies app/schema.sql before any new instance serves traffic.
             preDeployCommand: npm run db:migrate
             healthCheckPath: /ready
@@ -30,8 +30,6 @@ projects:
                 fromDatabase:
                   name: vibe-factory-db
                   property: connectionString
-              - key: APPS_REPO
-                sync: false
               # Generated once when the Blueprint creates the gateway and
               # preserved across later syncs.
               - key: FACTORY_API_KEY

@@ -46,6 +46,8 @@ export interface Agent {
 	 */
 	readonly renderTools?: readonly string[];
 	readonly maxTurns?: number;
+	/** Hard deadline of the Render Workflows task that runs this agent. */
+	readonly timeoutSeconds: number;
 	/** Render Workflows instance plan. */
 	readonly plan?: string;
 }

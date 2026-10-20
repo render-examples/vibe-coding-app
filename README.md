@@ -11,6 +11,19 @@ fit together in an agent product.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/vibe-code-demo)
 
+Before you deploy, prepare:
+
+- a Render workspace with Workflows and
+  [Sandboxes early access](https://render.com/docs/sandboxes);
+- an empty GitHub repository for generated apps, with Render's GitHub app
+  installed on it;
+- a GitHub App or fine-grained token with Contents: write on that repository;
+- Anthropic and Render API keys, plus the Render workspace ID; and
+- a lowercase UI username and a UI password of at least 16 characters.
+
+After the factory deploys, complete the
+[one-time apps Blueprint step](docs/0_QUICKSTART.md#connect-the-apps-blueprint).
+
 ## Why it matters
 
 Most "prompt to app" demos stop at generated code or a preview. Shipping
@@ -48,7 +61,7 @@ product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
 
 | Component | Render primitive | Role |
 | --- | --- | --- |
-| Gateway | Web service (Docker) | Authenticates callers, records runs, starts tasks. No model key or GitHub credential. |
+| Gateway | Web service (Docker) | Authenticates callers, records runs, and starts tasks. It has no model key or GitHub credential, but it does hold the Render API key used for task dispatch. |
 | Factory DB | Managed Postgres | Run state, progress, idempotency, concurrency cap |
 | Workflows host | Workflow | Runs the agents, verification, publish, and deploy checks. Holds the model key and GitHub credential. |
 | Sandbox | Sandbox | Disposable machine where the builder writes and runs code |

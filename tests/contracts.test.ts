@@ -87,6 +87,51 @@ describe("slug", () => {
 });
 
 describe("manifestSchema", () => {
+	const service = {
+		name: "web",
+		kind: "static_site",
+		rootDir: "web",
+		buildCommand: "npm run build",
+	};
+
+	it("accepts only plain relative service paths and absolute endpoint paths", () => {
+		const accepts = (overrides: Record<string, unknown>) =>
+			manifestSchema.safeParse({
+				services: [{ ...service, ...overrides }],
+			}).success;
+
+		expect(
+			accepts({
+				rootDir: ".",
+				staticPublishPath: "dist/client",
+				healthCheckPath: "/health",
+				dataCheckPath: "/api/products.json",
+			}),
+		).toBe(true);
+
+		for (const rootDir of [
+			"/web",
+			"../web",
+			"web/../../other",
+			"web//src",
+			"web\n",
+		]) {
+			expect(accepts({ rootDir }), rootDir).toBe(false);
+		}
+		for (const path of [
+			".evil.com/x",
+			"health",
+			"/health?full=true",
+			"/health\n",
+		]) {
+			expect(accepts({ healthCheckPath: path }), path).toBe(false);
+			expect(accepts({ dataCheckPath: path }), path).toBe(false);
+		}
+		for (const staticPublishPath of ["/dist", "../dist", "dist/../../other"]) {
+			expect(accepts({ staticPublishPath }), staticPublishPath).toBe(false);
+		}
+	});
+
 	// Render takes one or the other. With neither, the Blueprint would get an
 	// empty property.
 	it("requires exactly one of property and envVarKey on fromService", () => {
@@ -94,10 +139,7 @@ describe("manifestSchema", () => {
 			manifestSchema.safeParse({
 				services: [
 					{
-						name: "web",
-						kind: "static_site",
-						rootDir: "web",
-						buildCommand: "npm run build",
+						...service,
 						envVars: [{ key: "VITE_API_HOST", fromService }],
 					},
 				],

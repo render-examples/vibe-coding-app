@@ -48,4 +48,11 @@ describe("agent definitions", () => {
 	it("gives every agent a unique id", () => {
 		expect(new Set(all.map((agent) => agent.id)).size).toBe(all.length);
 	});
+
+	it("gives every agent task an explicit deadline", () => {
+		for (const agent of all) {
+			expect(agent.timeoutSeconds, agent.id).toBeGreaterThan(0);
+			expect(agent.timeoutSeconds, agent.id).toBeLessThanOrEqual(60 * 60);
+		}
+	});
 });

@@ -145,8 +145,9 @@ export function connectSandbox(sandboxId: string): Sandbox {
 
 /**
  * The sandbox group of the workspace, for the link to a sandbox in the Render
- * Dashboard. A sandbox does not name its group, but in the alpha a workspace
- * has at most one. With more than one, the group of a sandbox is not known.
+ * Dashboard. A sandbox does not name its group, but in early access a
+ * workspace has at most one. With more than one, the group of a sandbox is
+ * not known.
  */
 export async function sandboxGroupId(): Promise<string | null> {
 	const { client, ownerId } = api();
