@@ -1,6 +1,6 @@
-# vibe-code-demo
+# vibe-coding-app
 
-vibe-code-demo turns a plain-English app idea into a live, verified
+vibe-coding-app turns a plain-English app idea into a live, verified
 application on Render. You type "Build a website for a local barbershop", and a
 few minutes later you have a public URL. When the idea needs saved data, you
 also get an API and a Postgres database, all wired together and smoke-tested.
@@ -9,7 +9,7 @@ It is a reference app: real, running TypeScript that shows how Render
 Workflows, Sandboxes, Blueprints, Postgres, and the read-only Render MCP server
 fit together in an agent product.
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/vibe-code-demo)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/vibe-coding-app)
 
 Before you deploy, prepare:
 
@@ -21,8 +21,8 @@ Before you deploy, prepare:
 - Anthropic and Render API keys, plus the Render workspace ID; and
 - a lowercase UI username and a UI password of at least 16 characters.
 
-After the factory deploys, complete the
-[one-time apps Blueprint step](docs/0_QUICKSTART.md#connect-the-apps-blueprint).
+After the factory deploys, run `npm run setup:apps-repo` and complete the
+[one-time apps Blueprint step](docs/0_QUICKSTART.md#3-connect-the-apps-blueprint).
 
 ## Why it matters
 
@@ -80,8 +80,8 @@ product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
   its own managed database.
 - **Blueprints** are the only way the factory creates infrastructure: the
   workflow commits a `render.yaml`, and Render's Blueprint sync deploys it.
-- **Render MCP** gives two agents read-only views of the workspace, enforced
-  by an allowlist in code.
+- **Render MCP** gives the architect a read-only view of the workspace,
+  enforced by an allowlist in code.
 
 ## Prerequisites
 
@@ -99,11 +99,12 @@ product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
 ## Quick start
 
 The [Quickstart](docs/0_QUICKSTART.md) is the canonical setup guide. It covers
-installation, local processes, the first app, the one-time apps Blueprint,
+installation, local processes, the one-time apps Blueprint, the first app,
 deployment, diagnostics, operations, and cleanup.
 
-Local development still creates real Render Sandboxes and deploys real,
-billable services.
+Local development still creates real Render Sandboxes and deploys real
+services. Generated static sites are free; a generated API and database use
+paid plans and bill until you delete the app.
 
 ## Deploy the factory to Render
 

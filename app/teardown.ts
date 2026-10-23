@@ -78,7 +78,7 @@ interface Project {
  * its list.
  *
  * A read of the syncs that fails is tried again, as retryRead() describes.
- * Each failed attempt goes to the progress of the delete.
+ * Each failed attempt is reported as delete progress.
  */
 export async function waitForBlueprintSyncs(
 	blueprintId: string,

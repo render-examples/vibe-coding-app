@@ -42,10 +42,10 @@ export const deleteAppInputSchema = z.object({
 
 export type DeleteAppInput = z.infer<typeof deleteAppInputSchema>;
 
-/** The input of the step of a delete that waits for the syncs of the apps Blueprint. */
+/** Input to the delete step that waits for apps Blueprint syncs to finish. */
 export const waitForSyncsInputSchema = deleteAppInputSchema.extend({
 	/**
-	 * When the delete pushed the commit that took the app out of the
+	 * When this delete pushed the commit that removed the app from the
 	 * Blueprint, or null if an earlier attempt pushed it.
 	 */
 	pushedAt: z.number().int().nonnegative().nullable(),
@@ -74,9 +74,9 @@ export const deployPlanSchema = z.object({
 		.min(1)
 		.max(4),
 	/**
-	 * The subjects that the workflow finds photographs of, one each. Capped
-	 * low on purpose — each subject is a Commons round trip, and a landing
-	 * page needs a few good photographs, not a gallery.
+	 * Subjects the workflow finds one photograph for each. Capped low on
+	 * purpose: each subject is a Commons round trip, and a landing page needs
+	 * a few good photographs, not a gallery.
 	 */
 	assetQueries: z.array(z.string().min(3).max(120)).max(4).optional().default([]),
 	brief: z.object({
@@ -199,25 +199,6 @@ export const buildOutputSchema = z.object({
 
 export type BuildOutput = z.infer<typeof buildOutputSchema>;
 
-/* ── Deploy manager ───────────────────────────────────────────────────── */
-
-export const deployFailureSchema = z.object({
-	serviceName: z.string().min(1).max(120),
-	status: z.string().min(1).max(60),
-	diagnosis: z.string().min(1).max(4000),
-	logs: z.string().max(8000).optional(),
-});
-
-/**
- * The workflow runs the deploy manager only when Render reported a failed
- * deploy, so the diagnosis cannot declare the services healthy.
- */
-export const deployDiagnosisSchema = z.object({
-	failures: z.array(deployFailureSchema).max(10),
-});
-
-export type DeployDiagnosis = z.infer<typeof deployDiagnosisSchema>;
-
 /* ── The stored app spec ──────────────────────────────────────────────── */
 
 /**
@@ -235,9 +216,9 @@ export const appSpecSchema = z.object({
 	resourcePrefix: slug,
 	manifest: manifestSchema,
 	/**
-	 * Set when a delete of the app starts. The root Blueprint leaves the app
-	 * out, and this file stays until the app's Render resources are gone,
-	 * because a retry of the delete reads it to find them.
+	 * Set when the app's delete starts. The root Blueprint leaves the app out,
+	 * and this file stays until the app's Render resources are gone, because a
+	 * retried delete reads it to find them.
 	 */
 	deletedAt: z.string().min(1).optional(),
 });
@@ -245,8 +226,8 @@ export const appSpecSchema = z.object({
 export type AppSpec = z.infer<typeof appSpecSchema>;
 
 /**
- * The input of the step of a delete that deletes the app's Render resources:
- * only the fields of the spec that name them.
+ * Input to the delete step that removes the app's Render resources: only the
+ * spec fields that name them.
  */
 export const deleteResourcesInputSchema = appSpecSchema.pick({
 	user: true,
@@ -259,9 +240,9 @@ export type DeleteResourcesInput = z.infer<typeof deleteResourcesInputSchema>;
 /* ── Verify and publish ───────────────────────────────────────────────── */
 
 /**
- * The input of verify-app. The sandbox holds the builder's files, and
- * workflow code gives its id, never a model. The app directory comes from
- * user and appName, so the input names no path.
+ * Input to verify-app. The sandbox holds the builder's files, and workflow
+ * code supplies its ID, never a model. The app directory comes from user and
+ * appName, so the input names no path.
  */
 export const verifyAppInputSchema = z.object({
 	sandboxId: z.string().min(1),
@@ -275,11 +256,11 @@ export const verifyAppInputSchema = z.object({
 export type VerifyAppInput = z.infer<typeof verifyAppInputSchema>;
 
 /**
- * The input of publish-app. `sandboxId` is the sandbox of the build, which
- * publish-app reads the files of the app from. It pushes from a sandbox of
- * its own. The spec gives factory.json and both Blueprints. The repository
- * and the GitHub token come from the configuration of the workflow, never
- * from the input: the Render Dashboard shows the input of each task run.
+ * Input to publish-app. `sandboxId` is the build sandbox that publish-app
+ * reads the app's files from; it pushes from its own sandbox. The spec yields
+ * factory.json and both Blueprints. The repository and GitHub token come from
+ * the workflow's environment, never from the input, because the Render
+ * Dashboard shows every task run's input.
  */
 export const publishAppInputSchema = z.object({
 	sandboxId: z.string().min(1),

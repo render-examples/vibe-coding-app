@@ -8,7 +8,7 @@ import * as agents from "../app/agents.js";
 import type { Agent } from "../app/claude.js";
 import { RENDER_READ_ONLY_TOOLS } from "../app/policy.js";
 
-const all: Agent[] = [agents.architect, agents.builder, agents.deployManager];
+const all: Agent[] = [agents.architect, agents.builder];
 
 const toolNames = (agent: Agent) => (agent.tools ?? []).map((tool) => tool.name);
 
@@ -22,13 +22,11 @@ describe("agent definitions", () => {
 			]),
 		);
 		expect(toolNames(agents.architect)).toEqual([]);
-		expect(toolNames(agents.deployManager)).toEqual([]);
 	});
 
-	it("gives the architect and the deploy manager only read-only Render tools, and no agent a log tool", () => {
-		for (const agent of [agents.architect, agents.deployManager]) {
-			expect(agent.renderTools?.length, agent.id).toBeGreaterThan(0);
-		}
+	it("gives the architect only read-only Render tools, and no agent a log tool", () => {
+		expect(agents.architect.renderTools?.length).toBeGreaterThan(0);
+		expect(agents.builder.renderTools ?? []).toEqual([]);
 		for (const agent of all) {
 			const granted = agent.renderTools ?? [];
 			expect(RENDER_READ_ONLY_TOOLS, agent.id).toEqual(

@@ -184,7 +184,7 @@ export function md(
  * Call an agent that must return structured output, and check the output
  * with its Zod schema. The SDK checks it against the JSON Schema of the
  * agent, but a JSON Schema cannot hold each Zod rule, such as a refinement.
- * So a failure goes back to the agent one time, with the Zod error, and a
+ * So a failure goes back to the agent once, with the Zod error, and a
  * second failure stops the stage.
  */
 export async function agentJson<T>(

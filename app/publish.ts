@@ -1,7 +1,7 @@
 /**
- * publish-app, and each other write to the apps repository. A write clones
- * the repository in a sandbox of its own, makes one change, commits only the
- * directory of one app and the root Blueprint, and pushes.
+ * publish-app, and every other write to the apps repository. Each write
+ * clones the repository into its own sandbox, makes one change, commits only
+ * one app's directory and the root Blueprint, and pushes.
  */
 import { type TaskContext, task } from "@renderinc/sdk/workflows";
 import {
@@ -41,21 +41,19 @@ import {
 const PUBLISH_TIMEOUT_SECONDS = 10 * 60;
 
 /**
- * Copy the files of the app out of the sandbox of the run, into a new clone
- * of the apps repository in a sandbox of its own. There, write factory.json,
- * the app's render.yaml and README, and the root Blueprint from the spec,
- * commit them with the app, and push. Render deploys the push, so the parent
- * starts this only after verify-app passes. Returns the pushed commit, or
- * null when no file changed, and the services that Render deploys again for
- * it.
+ * Copy the app's files out of the run's sandbox into a fresh clone of the
+ * apps repository, in a separate sandbox. There, write factory.json, the
+ * app's render.yaml and README, and the root Blueprint from the spec, commit
+ * them with the app, and push. Render deploys the push, so the parent starts
+ * this only after verify-app passes. Returns the pushed commit (null when no
+ * file changed) and the services Render will redeploy for it.
  *
- * The builder can run any command in the sandbox of the run. A process that
- * it starts stays after the command, and it can change git itself. So the
- * GitHub token never goes into that sandbox, and publish-app reads the files
- * of the app from it only as data.
+ * The builder can run any command in the run's sandbox, leave a process
+ * running, and even replace git. So the GitHub token never enters that
+ * sandbox, and publish-app reads the app's files from it only as data.
  *
- * Render does not retry it. A retry after the push finds nothing to commit,
- * and the run then ends as if the push changed no files.
+ * Render does not retry it. A retry after the push would find nothing to
+ * commit, and the run would end as if the push changed no files.
  */
 export const publishAppTask = task(
 	{
@@ -109,15 +107,14 @@ export const publishAppTask = task(
 export interface PublishResult {
 	/** The pushed commit, or null when no file changed. */
 	commit: string | null;
-	/** The manifest services that the commit gives a new deploy. */
+	/** The manifest services the commit will redeploy. */
 	changedServices: string[];
 }
 
 /**
- * The manifest services whose directory holds a path that the commit
- * changes. The buildFilter of each service is its directory, so Render
- * deploys only these again. A rootDir of "." is the app directory, which
- * holds factory.json.
+ * The manifest services whose directory contains a path the commit changes.
+ * Each service's buildFilter is its directory, so Render redeploys only
+ * these. A rootDir of "." is the app directory, which holds factory.json.
  */
 export function servicesChangedBy(
 	spec: AppSpec,
@@ -138,8 +135,8 @@ async function writeBlueprints(
 	appDir: string,
 	repoUrl: string,
 ): Promise<void> {
-	// The .gitignore comes with the files of the app. verify() writes it,
-	// because it must build from the same files that this commit holds.
+	// The .gitignore arrives with the app's files. verify() writes it, because
+	// it must build from the same files this commit holds.
 	await sandbox.writeFile(
 		`${appDir}/factory.json`,
 		`${JSON.stringify(spec, null, 2)}\n`,
@@ -154,12 +151,11 @@ async function writeBlueprints(
  * Regenerate the repository-root Blueprint from every app's factory.json.
  *
  * Derived state, never merged: a concurrent run adds its own app to the same
- * file. So when another run pushes first, the change that calls this runs
- * again on the new tip, and the file gets the apps of both runs.
+ * file. When another run pushes first, the change that calls this reruns on
+ * the new tip, and the file gets both runs' apps.
  *
- * It reads the specs from a clone that no agent used. In it, the builder
- * wrote only the files of its own app, and publish-app wrote its
- * factory.json.
+ * It reads the specs from a clone no agent used. There, the builder's files
+ * cover only its own app, and publish-app wrote that app's factory.json.
  */
 export async function writeRootBlueprint(sandbox: Sandbox): Promise<void> {
 	const specs = await readAllSpecs(sandbox);
@@ -170,9 +166,9 @@ export async function writeRootBlueprint(sandbox: Sandbox): Promise<void> {
 }
 
 /**
- * The spec of each app in the clone. A spec counts only in the directory of
- * the app that it names, so a file in one app directory cannot declare the
- * resources of a different app.
+ * Every app's spec in the clone. A spec counts only in the directory of the
+ * app it names, so a file in one app's directory cannot declare resources for
+ * another app.
  */
 async function readAllSpecs(sandbox: Sandbox): Promise<AppSpec[]> {
 	const root = `${factoryConfig.repoDir}/${factoryConfig.appsDir}`;
@@ -214,13 +210,13 @@ interface AppsClone {
 }
 
 /**
- * Clone the apps repository in a new sandbox, do the work, and terminate the
- * sandbox. No agent uses this sandbox, so the GitHub token can go into it.
- * The token comes just before the clone: an installation token expires after
- * an hour, and a run can take two hours.
+ * Clone the apps repository into a new sandbox, do the work, and terminate
+ * the sandbox. No agent uses this sandbox, so the GitHub token can enter it.
+ * The token is fetched just before the clone: an installation token expires
+ * after an hour, and a run can take two.
  *
  * Each push makes its own clone, so it starts from the newest commit, and no
- * sandbox stays up while a run or the steps of a delete wait.
+ * sandbox stays up while a run or a delete waits.
  */
 export async function inAppsClone<T>(
 	timeoutSeconds: number,
@@ -245,11 +241,10 @@ export async function inAppsClone<T>(
 }
 
 /**
- * Make the change of one app in the clone, commit it, and push it. The
- * commit holds only the app's directory and the root Blueprint. When another
- * run pushes first, `change` runs again on the new tip. A change that
- * changes no file makes no commit, and there is nothing to push. Returns the
- * commit that it pushed, or null.
+ * Apply one app's change in the clone, commit it, and push. The commit holds
+ * only the app's directory and the root Blueprint. When another run pushes
+ * first, `change` reruns on the new tip. A change that touches no file makes
+ * no commit. Returns the pushed commit, or null.
  */
 export async function commitAndPush(
 	clone: AppsClone,
@@ -283,7 +278,7 @@ function appReadme(spec: AppSpec, repoUrl: string): string {
 		"",
 		spec.summary,
 		"",
-		`Generated by the Vibe Code factory from the prompt: "${oneLine(spec.prompt)}"`,
+		`Generated by vibe-coding-app from the prompt: "${oneLine(spec.prompt)}"`,
 		"",
 		"## Infrastructure",
 		"",

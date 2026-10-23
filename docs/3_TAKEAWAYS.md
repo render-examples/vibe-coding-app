@@ -1,140 +1,107 @@
 # Takeaways
 
-This repository is a reference architecture, not a framework. The useful
-parts are the boundaries and feedback loops, not the exact stack. The lessons
-below describe what to carry into your own coding agent, internal platform,
-or AI-assisted deployment system.
+This repository is a reference architecture, not a framework: the boundaries
+and feedback loops are worth copying, the exact stack is not. For the
+implementation behind each lesson, read [2_ARCHITECTURE.md](2_ARCHITECTURE.md).
 
-For the implementation behind each lesson, read
-[2_ARCHITECTURE.md](2_ARCHITECTURE.md).
+## 1. Keep credentials out of the code that runs untrusted work
 
-## 1. Split public control from privileged execution
+The internet-facing gateway authenticates, validates, records, and dispatches;
+a separate workflow process holds the model and repository credentials. The
+same split repeats inside the workflow: the build Sandbox never receives a
+GitHub token. Publishing copies regular files out as data, then commits from a
+fresh Sandbox no agent has touched, and the push rejects changes outside the
+app directory and root Blueprint.
 
-The gateway authenticates, validates, records, and dispatches. A separate
-workflow process holds model and repository credentials and performs risky
-work.
-
-**Apply it:** inventory credentials by process. Give an internet-facing
-service only the secrets required to accept and route a request. Move model,
-source-control, and infrastructure credentials to a non-public worker.
-
-**Tradeoff:** another service and deployment boundary to operate.
-
-In this repository: `app/server.ts`, `app/host.ts`, `app/config.ts`, and
-`render.yaml`.
-
-## 2. Treat isolation as the shell-command policy
-
-The builder can execute arbitrary shell commands. The factory does not
-pretend a command regex can make arbitrary shell safe. Instead, it runs the
-builder in a disposable Sandbox containing one app and no valuable
-credential.
-
-**Apply it:** assume a capable model will eventually bypass prompt rules and
-command filters. Make the execution environment safe even when that happens:
-minimal files, minimal environment, bounded lifetime, explicit egress, and
-cleanup in `finally`.
-
-**Tradeoff:** provisioning latency and compute cost.
-
-In this repository: `app/sandbox.ts`, `app/tools.ts`, and `app/policy.ts`.
-
-## 3. Separate untrusted building from trusted publishing
-
-The build Sandbox never receives a GitHub token. Publishing copies regular
-files out as data, then commits from a fresh Sandbox no agent has touched.
-The push rejects changes outside the app directory and root Blueprint.
-
-**Apply it:** split CI or agent pipelines into an untrusted build phase and a
-small trusted release phase. Pass an artifact across a narrow, validated
+**Apply it:** inventory credentials by process and give each one only what its
+job needs. Split agent or CI pipelines into an untrusted build phase and a
+small trusted release phase, and pass an artifact across a narrow, validated
 boundary instead of adding credentials to the build environment.
 
-**Tradeoff:** an extra artifact format, validation step, and execution
-environment.
+**Tradeoff:** more services, an artifact format, and an extra execution
+environment to operate.
 
-In this repository: `app/files.ts`, `app/publish.ts`, and `app/git.ts`.
+In this repository: `app/server.ts`, `app/host.ts`, `app/config.ts`,
+`app/files.ts`, `app/publish.ts`, `app/git.ts`, and `render.yaml`.
 
-## 4. Keep capabilities in code, not prompts
+## 2. Enforce capabilities with isolation and code, not prompts or filters
 
-Each agent receives an explicit tool set. Built-in file and shell tools are
-disabled, environment forwarding is allowlisted, and a pre-tool hook checks
-every call.
+The builder can run arbitrary shell commands, and no command regex can make
+that safe. Instead, it runs in a disposable Sandbox that holds one app and no
+valuable credential. Each agent gets an explicit tool set in code: built-in
+file and shell tools are disabled, environment forwarding is allowlisted, and
+a pre-tool hook keeps every path inside the app directory and every Render
+tool read-only.
 
-**Apply it:** define capabilities beside the agent in versioned code and make
-permission changes reviewable. Use prompts to explain permissions, never to
-enforce them.
+**Apply it:** assume a capable model will eventually bypass prompt rules and
+command filters, and make the environment safe when it does: minimal files,
+minimal environment, bounded lifetime, explicit egress, and cleanup in
+`finally`. Define capabilities beside the agent in versioned code so
+permission changes are reviewable. Use prompts to explain permissions, never
+to enforce them.
 
-**Tradeoff:** adding a capability requires code, tests, and usually a
-deployment.
+**Tradeoff:** provisioning latency and compute cost, and a new capability
+needs code, tests, and a deployment.
 
-In this repository: `Agent` and `runClaude()` in `app/claude.ts`,
-`app/agents.ts`, and `tests/agents.test.ts`.
+In this repository: `app/sandbox.ts`, `app/tools.ts`, `app/policy.ts`,
+`Agent` and `runClaude()` in `app/claude.ts`, `app/agents.ts`, and
+`tests/agents.test.ts`.
 
-## 5. Let models propose; let contracts and systems decide
+## 3. Narrow what the model can generate
 
-Architect, builder, and deploy-manager output is schema-validated. A model
-may diagnose a failed deploy, but it cannot override Render's failed status
-or deterministic verification.
+Architect and builder output is schema-validated. The builder returns a
+limited manifest, and trusted code turns it into a Render Blueprint, so agents
+never submit arbitrary YAML or create resources directly. A template supplies
+the integration details models repeatedly get wrong (CORS, public API host
+wiring, idempotent migrations) and leaves product content and behavior to the
+builder.
 
-**Apply it:** put a typed contract after every model boundary. Give models
-room to generate or diagnose, then let parsers, compilers, tests, databases,
-and platform status make acceptance decisions.
+**Apply it:** put a typed contract after every model boundary. Model only the
+infrastructure primitives your product can verify, observe, price, and
+delete, generate provider configuration from that model, and keep the
+resulting Git diff as the audit record. Template the small set of contracts
+models get wrong, and build those templates in CI alongside the orchestrator
+that consumes them.
 
-**Tradeoff:** useful but schema-incompatible output fails closed.
+**Tradeoff:** useful but schema-incompatible output fails closed, and each
+new primitive or stack needs work across planning, validation, deployment,
+verification, and cleanup.
 
-In this repository: `app/contracts.ts`, `agentJson()` in `app/claude.ts`, and
-`repairDeploys()` in `app/deploy.ts`.
+In this repository: `app/contracts.ts` (including `manifestSchema`),
+`agentJson()` in `app/claude.ts`, `app/blueprint.ts`, `templates/fullstack`,
+`app/templates.ts`, and `tests/templates.test.ts`.
 
-## 6. Generate infrastructure from a closed manifest
+## 4. Accept only what real systems verify, and bound the repairs
 
-The builder returns a limited manifest. Trusted code turns it into a Render
-Blueprint. Agents cannot submit arbitrary YAML or directly create resources.
+No model output can end a run as `deployed`. Before publishing, the workflow
+removes ignored output, runs deployment commands, starts services, applies
+migrations, and queries real data. After deployment, only a new `live` deploy
+status and smoke checks of public routing, browser-to-API wiring, data, and
+CORS count. Build and deploy repairs have fixed round limits, and every repair
+repeats verification and publishing. A deploy repair cannot change the
+resource set, and each wait requires a deploy newer than the one that failed.
 
-**Apply it:** model only the primitives your product can verify, observe,
-price, and delete. Generate provider configuration from that model and keep
-the resulting Git diff as the audit record.
+**Apply it:** give models room to generate and diagnose, then let compilers,
+tests, databases, and platform status make the acceptance decision. Test a
+clean artifact with production commands, and add post-deploy checks for
+integration behavior a health endpoint can't prove. Define what a repair may
+change, cap attempts, rerun the same acceptance path after every fix, and
+record the prior external state so stale success can't pass for a new result.
 
-**Tradeoff:** adding a new primitive requires work across planning,
-validation, deployment, verification, and cleanup.
+**Tradeoff:** longer runs, more failure modes to operate, and some fixable
+runs stop and need a new request.
 
-In this repository: `manifestSchema` in `app/contracts.ts` and
-`app/blueprint.ts`.
+In this repository: `app/verify.ts`, `app/build.ts`, `repairDeploys()`,
+`firstWaits()`, `resourceChange()`, and the smoke checks in `app/deploy.ts`,
+and `waitForDeploy()` in `app/render.ts`.
 
-## 7. Verify the artifact that will actually ship
+## 5. Use agents only where judgment earns its cost
 
-Before publishing, the workflow removes ignored output, runs deployment
-commands, starts services, applies migrations, and queries real data. After
-deployment, it checks public routing, browser-to-API wiring, data, and CORS.
-
-**Apply it:** test from a clean artifact with production commands. Add
-post-deploy checks for integration behavior that a build and health endpoint
-cannot prove.
-
-**Tradeoff:** longer runs, additional dependencies, and more failure modes to
-operate.
-
-In this repository: `app/verify.ts` and the smoke checks in `app/deploy.ts`.
-
-## 8. Bound repair loops and preserve their invariants
-
-Build and deploy repairs have fixed round limits. Every repair repeats
-verification and publishing. A deploy repair cannot change the resource set,
-and each wait requires a deploy newer than the one that failed.
-
-**Apply it:** define what a repair may change, cap attempts, and run the same
-acceptance path after every fix. Record the prior external state so stale
-success cannot be mistaken for a new result.
-
-**Tradeoff:** some fixable runs stop and require a new request.
-
-In this repository: `app/build.ts`, `firstWaits()` and `resourceChange()` in
-`app/deploy.ts`, and `waitForDeploy()` in `app/render.ts`.
-
-## 9. Use agents only where judgment earns its cost
-
-Agents design the product, write code, and interpret deploy failures.
-Workflow code downloads images, verifies builds, writes Blueprints, publishes
-Git, waits on Render, and deletes resources.
+Two agents design the product and write and repair the code. Workflow code
+downloads images, verifies builds, fetches and redacts deploy logs, writes
+Blueprints, publishes Git, waits on Render, and deletes resources. A separate
+agent that only summarized deploy logs would add a model call and a schema
+without adding judgment the builder lacks, so the builder reads them directly.
 
 **Apply it:** ask whether a step needs interpretation or creativity. If its
 correct behavior can be expressed as bounded deterministic code, implement
@@ -145,39 +112,34 @@ and test it directly.
 In this repository: compare `app/agents.ts` with `app/images.ts`,
 `app/verify.ts`, and `app/publish.ts`.
 
-## 10. Make durable state explicit and reconcile it
+## 6. Make durable state explicit, and size tasks by their side effects
 
 Postgres stores run status, progress, task IDs, and app ownership. Unique keys
-make requests idempotent; advisory locks protect global capacity and per-app
-races. API reads reconcile rows with the workflow system when a task dies
-before recording its result.
+make requests idempotent, advisory locks protect global capacity and per-app
+races, and API reads reconcile rows with the workflow system when a task dies
+before recording its result. Agents, verification, publishing, and delete
+steps are separate workflow tasks with their own inputs, outputs, timings,
+and logs. Top-level workflows don't retry because they contain expensive,
+non-idempotent side effects; narrow operations do, such as Render reads and
+Git pushes racing on the branch tip.
 
-**Apply it:** model the job state machine in durable storage. Assume a worker
-can vanish between the side effect and the final status write, and provide a
-reconciliation path.
+**Apply it:** model the job state machine in durable storage, assume a worker
+can vanish between a side effect and its status write, and provide a
+reconciliation path. Split a long workflow where permissions, retries,
+timeouts, or operator diagnosis differ. Retry a read, a conditional write, or
+a derived commit, not a whole agent workflow, unless it has explicit
+checkpoints. Keep task payloads small and assume operators can see them.
 
-**Tradeoff:** more state-machine and database code than a fire-and-forget
-queue.
+**Tradeoff:** more state-machine, orchestration, and database code than a
+fire-and-forget queue, and a failed run starts over as a new run.
 
-In this repository: `app/store.ts` and `reconcileWorkflowRun()` in
-`app/gateway.ts`.
+In this repository: `app/store.ts` (including `RUN_STAGES`),
+`reconcileWorkflowRun()` in `app/gateway.ts`, task definitions and retry
+settings in `app/workflow.ts` and the stage modules, `agentTask()` in
+`app/agents.ts`, `retryRead()` in `app/render.ts`, and `pushVerified()` in
+`app/git.ts`.
 
-## 11. Retry the smallest safe operation
-
-Top-level workflows do not retry because they contain expensive,
-non-idempotent side effects. Narrow operations do retry: Render reads and Git
-pushes racing on the branch tip.
-
-**Apply it:** classify side effects before enabling retries. Retry a read, a
-conditional write, or a derived commit—not an entire agent workflow—unless
-the workflow has explicit checkpoints and idempotent steps.
-
-**Tradeoff:** without checkpointing, a failed run starts over as a new run.
-
-In this repository: task retry settings in `app/workflow.ts`,
-`retryRead()` in `app/render.ts`, and `pushVerified()` in `app/git.ts`.
-
-## 12. Design deletion with the same care as creation
+## 7. Design deletion with the same care as creation
 
 Removing an app from a declarative file does not delete its resources, and an
 older sync can recreate a resource deleted too early. The delete path first
@@ -192,36 +154,6 @@ ownership, and make every step safe to rerun.
 
 In this repository: `removeApp()` in `app/workflow.ts`, `app/delete.ts`, and
 `app/teardown.ts`.
-
-## 13. Put platform contracts in templates
-
-The template captures recurring integration details—CORS, public API host
-wiring, idempotent migrations—while leaving product-specific content and
-behavior to the builder.
-
-**Apply it:** template the small set of contracts models repeatedly get
-wrong. Build templates in CI and keep them versioned with the orchestrator
-that consumes them.
-
-**Tradeoff:** templates narrow the supported stack and require maintenance.
-
-In this repository: `templates/fullstack`, `app/templates.ts`, and
-`tests/templates.test.ts`.
-
-## 14. Make task boundaries useful to operators
-
-Agents, verification, publishing, and delete steps are separate workflow
-tasks with distinct inputs, outputs, timings, and logs. Run stages and
-structured events expose progress without giving clients internal control.
-
-**Apply it:** split long workflows where permissions, retries, timeouts, or
-operator diagnosis differ. Keep task payloads small and assume operators can
-see them.
-
-**Tradeoff:** more task definitions and orchestration code.
-
-In this repository: `agentTask()` in `app/agents.ts`, task definitions in
-the stage modules, `RUN_STAGES` in `app/store.ts`, and the browser UI.
 
 ## What not to copy unchanged
 

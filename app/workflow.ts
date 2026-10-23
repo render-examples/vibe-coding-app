@@ -2,7 +2,7 @@
  * prompt-to-app — one API call to a deployed app on Render.
  * delete-app — one API call to remove that app again.
  *
- * Each stage is one call here. Its detail is in the module of the stage:
+ * Each stage is one call here. The details live in each stage's module:
  * build, verify, publish, deploy, or delete.
  */
 import { type TaskContext, task } from "@renderinc/sdk/workflows";
@@ -93,13 +93,13 @@ export const promptToApp = task(
 );
 
 /**
- * The pipeline. Each agent runs as a subtask on its own compute, through
- * `tasks`, the context that Render Workflows gives to prompt-to-app. So do
- * the verification of the app and its publish. On Render, each subtask has
- * its own run, with its input, its result, and its logs.
+ * The pipeline. Each agent, verify-app, and publish-app runs as a subtask on
+ * its own compute through `tasks`, the context Render Workflows gives
+ * prompt-to-app. On Render, each subtask has its own run, input, result, and
+ * logs.
  *
- * The agents and verify-app work in the sandbox of the run. publish-app
- * copies the files of the app out of it.
+ * The builder and verify-app work in the run's sandbox. publish-app copies
+ * the app's files out of it.
  */
 async function run(
 	tasks: TaskContext,
@@ -119,7 +119,7 @@ async function run(
 		"architect",
 	);
 
-	const appName = plan.appName;
+	const appName = uniqueAppName(plan.appName, runId);
 	const blueprintPath = `${appRelativePath(user, appName)}/render.yaml`;
 	// Returned, not thrown: a delete in progress, or a different run of the
 	// same app, is an expected result, not a fault in the run.
@@ -174,6 +174,7 @@ async function run(
 			sandbox,
 			appDir,
 			user,
+			appName,
 			plan,
 			prompt,
 			runId,
@@ -197,8 +198,8 @@ async function run(
 
 		// ── Publish ─────────────────────────────────────────────────────
 		await setRunStage(runId, "publishing");
-		// Before the push: right after it, the newest deploys of a service that
-		// a rerun replaces are still those of the old app.
+		// Read before the push. If the app's services already exist, their
+		// newest deploys right after the push are still the old ones.
 		const deploysBefore = await deploysBeforePublish(workspaceId, spec);
 		const { commit, changedServices } = await tasks.run(publishAppTask, {
 			sandboxId: sandbox.id,
@@ -228,6 +229,17 @@ async function run(
 			.terminate()
 			.catch((error) => console.error("Failed to terminate sandbox:", error));
 	}
+}
+
+/**
+ * The architect names the app from the prompt, so two similar prompts can
+ * choose the same name, and the second run would replace the first app. The
+ * start of the run ID keeps them apart. resourceStem() keeps 24 characters
+ * of the name, so the base is cut to 19 to keep the suffix.
+ */
+export function uniqueAppName(base: string, runId: string): string {
+	const suffix = runId.replace(/[^a-z0-9]/gi, "").slice(0, 4).toLowerCase();
+	return `${base.slice(0, 19).replace(/-+$/, "")}-${suffix}`;
 }
 
 /**

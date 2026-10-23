@@ -96,13 +96,6 @@ code {
 	height: 20px;
 }
 
-/* The button that opens the other view of the UI. */
-.view-switch {
-	margin-left: auto;
-	text-decoration: none;
-	white-space: nowrap;
-}
-
 .topbar-label {
 	padding-left: 16px;
 	border-left: 1px solid var(--border);
@@ -332,78 +325,10 @@ input {
 	cursor: not-allowed;
 }
 
-/* Workspace: the run history beside the selected run. */
-.workspace {
-	display: grid;
-	grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
-	gap: 24px;
-	align-items: start;
-}
-
-.history-panel {
-	display: flex;
-	flex-direction: column;
-	gap: 16px;
-}
-
 .empty-history {
 	color: var(--text-faint);
 	font-size: 14px;
 	line-height: 20px;
-}
-
-.run-list {
-	display: flex;
-	flex-direction: column;
-	max-height: 560px;
-	overflow-y: auto;
-	border-top: 1px solid var(--border);
-}
-
-.run-item {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	width: 100%;
-	padding: 12px;
-	border: 0;
-	border-bottom: 1px solid var(--border);
-	border-radius: 0;
-	background: transparent;
-	color: var(--text);
-	font: inherit;
-	text-align: left;
-	cursor: pointer;
-}
-
-.run-item:hover {
-	background: var(--hover-tint);
-}
-
-.run-item.selected {
-	background: var(--selected);
-}
-
-.run-item strong {
-	overflow: hidden;
-	font-size: 15px;
-	font-weight: 400;
-	line-height: 22px;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-/* Medium weight too, so that the selected run differs from a hover. */
-.run-item.selected strong {
-	font-weight: 500;
-}
-
-.run-meta {
-	color: var(--text-faint);
-	font-family: var(--font-mono);
-	font-size: 12px;
-	line-height: 16px;
-	letter-spacing: 0;
 }
 
 .run-state[data-status="running"],
@@ -451,131 +376,6 @@ input {
 	border-radius: 50%;
 	background: var(--text);
 	animation: pulse 1.2s var(--ease) infinite;
-}
-
-/*
- * The stages read down the first column and then the second. Done is green,
- * the stage that runs now is the text color, and a stage that failed is red.
- */
-.stages {
-	display: grid;
-	grid-auto-flow: column;
-	grid-template-rows: repeat(5, auto);
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	column-gap: 24px;
-	margin: 0;
-	padding: 0;
-	border-top: 1px solid var(--border);
-	list-style: none;
-}
-
-.stages li {
-	position: relative;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 8px 0;
-	border-bottom: 1px solid var(--border);
-	color: var(--text-faint);
-	font-family: var(--font-mono);
-	font-size: 13px;
-	line-height: 20px;
-	letter-spacing: 0;
-	cursor: help;
-}
-
-.stages li:hover {
-	background: var(--hover-tint);
-}
-
-/* The name of a stage is a button only so that the keyboard can open its tooltip. */
-.stage-label {
-	padding: 0;
-	border: 0;
-	background: none;
-	color: inherit;
-	font: inherit;
-	letter-spacing: inherit;
-	text-align: left;
-	cursor: inherit;
-}
-
-.stages li::before {
-	flex: none;
-	width: 10px;
-	height: 10px;
-	border: 1px solid var(--border-strong);
-	content: "";
-}
-
-.stages li.complete {
-	color: var(--success);
-}
-
-.stages li.complete::before {
-	border-color: var(--success);
-	background: var(--success);
-}
-
-.stages li.active {
-	color: var(--text);
-	font-weight: 500;
-}
-
-.stages li.active::before {
-	border-color: var(--text);
-	background: var(--text);
-	animation: pulse 1.2s var(--ease) infinite;
-}
-
-.stages li.failed-stage {
-	color: var(--danger);
-}
-
-.stages li.failed-stage::before {
-	border-color: var(--danger);
-	background: var(--danger);
-}
-
-/*
- * The tooltip of a stage opens above it on hover or keyboard focus, so a
- * pointer that moves down the list does not go into an open tooltip. It
- * touches its stage, so the pointer can move onto it and it stays open.
- * Escape closes it (app.js). It is as wide as the column of its stage.
- */
-.stage-tip {
-	position: absolute;
-	right: 0;
-	bottom: 100%;
-	left: 0;
-	z-index: 1;
-	display: none;
-	flex-direction: column;
-	gap: 8px;
-	padding: 12px;
-	border: 1px solid var(--border-strong);
-	background: var(--surface-muted);
-	color: var(--text-secondary);
-	font-family: var(--font-default);
-	font-size: 14px;
-	font-weight: 400;
-	line-height: 20px;
-	letter-spacing: 0.01em;
-	cursor: auto;
-}
-
-.stages:not(.tips-closed) li:hover .stage-tip,
-.stages:not(.tips-closed) .stage-label:focus-visible + .stage-tip {
-	display: flex;
-}
-
-.stage-tip-where {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	padding-top: 8px;
-	border-top: 1px solid var(--border);
-	color: var(--text);
 }
 
 .progress {
@@ -675,8 +475,6 @@ input {
 .primary-button:focus-visible,
 .secondary-button:focus-visible,
 .danger-button:focus-visible,
-.run-item:focus-visible,
-.stage-label:focus-visible,
 .site-name:focus-visible,
 .site-url:focus-visible,
 .stage-links a:focus-visible,
@@ -686,7 +484,7 @@ input {
 }
 
 /*
- * The table view. Its tables have a mono header row, 1px rules, and no fills,
+ * The tables have a mono header row, 1px rules, and no fills,
  * as Render's tables do. The row of the selected site, and the row of the
  * stage that runs now, have a neutral tint.
  */
@@ -936,7 +734,6 @@ input {
 
 @media (prefers-reduced-motion: reduce) {
 	.activity,
-	.stages li.active::before,
 	.stage-table tr.active th::before {
 		animation: none;
 	}
@@ -947,7 +744,7 @@ input {
 	}
 }
 
-/* Tablet: one column. */
+/* Tablet: tighter padding and a smaller headline. */
 @media (max-width: 1023px) {
 	.topbar {
 		padding: 0 24px;
@@ -961,17 +758,9 @@ input {
 		font-size: 48px;
 		line-height: 52px;
 	}
-
-	.workspace {
-		grid-template-columns: minmax(0, 1fr);
-	}
-
-	.run-list {
-		max-height: 320px;
-	}
 }
 
-/* Mobile: one column of stages, and full-width form buttons. */
+/* Mobile: stacked stage rows, and full-width form buttons. */
 @media (max-width: 767px) {
 	.topbar {
 		padding: 0 16px;
@@ -989,12 +778,6 @@ input {
 
 	.panel {
 		padding: 16px;
-	}
-
-	.stages {
-		grid-auto-flow: row;
-		grid-template-rows: none;
-		grid-template-columns: minmax(0, 1fr);
 	}
 
 	.form-actions {
@@ -1061,7 +844,7 @@ input {
 	}
 }
 
-/* A phone has no room for the name of the demo beside the view button. */
+/* A phone has no room for the name of the demo beside the wordmark. */
 @media (max-width: 479px) {
 	.topbar-label {
 		display: none;
