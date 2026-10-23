@@ -31,6 +31,7 @@ export async function buildAndVerify(opts: {
 	sandbox: Sandbox;
 	appDir: string;
 	user: string;
+	appName: string;
 	plan: DeployPlan;
 	prompt: string;
 	runId: string;
@@ -51,7 +52,7 @@ export async function buildAndVerify(opts: {
 		const { failures } = await opts.tasks.run(verifyAppTask, {
 			sandboxId: opts.sandbox.id,
 			user: opts.user,
-			appName: opts.plan.appName,
+			appName: opts.appName,
 			manifest: buildOutput.manifest,
 			databaseUrl: opts.databaseUrl,
 		});

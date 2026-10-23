@@ -7,7 +7,13 @@
 import { type TaskContext, TaskRegistry } from "@renderinc/sdk/workflows";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appPath, factoryConfig } from "../factory.config.js";
-import type { AppSpec, Manifest, Service } from "../app/contracts.js";
+import { resourceStem } from "../app/blueprint.js";
+import {
+	type AppSpec,
+	type Manifest,
+	type Service,
+	slug,
+} from "../app/contracts.js";
 import type { AppFile } from "../app/files.js";
 import type { DeployOutcome } from "../app/render.js";
 import type { ExecResult, Sandbox } from "../app/sandbox.js";
@@ -21,12 +27,11 @@ import {
 import { awaitDeployment, type DeployContext } from "../app/deploy.js";
 import { publishAppTask } from "../app/publish.js";
 import { verifyAppTask } from "../app/verify.js";
-import { deleteApp, promptToApp } from "../app/workflow.js";
+import { deleteApp, promptToApp, uniqueAppName } from "../app/workflow.js";
 
 const mocks = vi.hoisted(() => ({
 	architectTask: vi.fn(),
 	buildTask: vi.fn(),
-	deployManagerTask: vi.fn(),
 	commitPaths: vi.fn(),
 	pushVerified: vi.fn(),
 	githubToken: vi.fn(),
@@ -53,7 +58,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../app/agents.js", () => ({
 	architectTask: { name: "architect", func: mocks.architectTask },
 	buildTask: { name: "builder", func: mocks.buildTask },
-	deployManagerTask: { name: "deploy-manager", func: mocks.deployManagerTask },
 }));
 
 vi.mock("../app/store.js", () => ({
@@ -115,8 +119,10 @@ const INPUT = {
 	user: "demo",
 	runId: "run-1",
 };
-const SHOP_APP = { user: "demo", appName: "shop" };
-const APP_DIR = appPath("demo", "shop");
+/** The architect names the app "shop"; the run ID "run-1" adds the suffix. */
+const APP_NAME = "shop-run1";
+const SHOP_APP = { user: "demo", appName: APP_NAME };
+const APP_DIR = appPath("demo", APP_NAME);
 const APP_SPEC = `${APP_DIR}/factory.json`;
 const APP_SOURCE = `${APP_DIR}/web/index.html`;
 const ROOT_BLUEPRINT = `${factoryConfig.repoDir}/${factoryConfig.blueprintPath}`;
@@ -183,7 +189,7 @@ const privateHost: Manifest = {
 /** The shop app as its first push published it. */
 const spec: AppSpec = {
 	user: "demo",
-	appName: "shop",
+	appName: APP_NAME,
 	prompt: INPUT.prompt,
 	summary: "A storefront, an API, and Postgres behind it.",
 	createdAt: "2026-01-01T00:00:00.000Z",
@@ -194,8 +200,8 @@ const spec: AppSpec = {
 };
 const cafe: AppSpec = { ...spec, appName: "cafe", prompt: "A menu for a cafe" };
 const CAFE_SPEC = `${appPath("demo", "cafe")}/factory.json`;
-const WEB_ID = "srv-acme-demo-shop-web";
-const API_ID = "srv-acme-demo-shop-api";
+const WEB_ID = "srv-acme-demo-shop-run1-web";
+const API_ID = "srv-acme-demo-shop-run1-api";
 
 function plan(...kinds: string[]) {
 	return {
@@ -533,6 +539,25 @@ afterEach(() => {
 
 /* ── prompt-to-app ────────────────────────────────────────────────────── */
 
+describe("uniqueAppName", () => {
+	it("gives two runs of the same name different apps, and keeps the suffix in every resource name", () => {
+		const first = uniqueAppName("bakery", "3f2a9c1e-0000-4000-8000-000000000000");
+		const second = uniqueAppName("bakery", "b81d0f77-0000-4000-8000-000000000000");
+		expect(first).toBe("bakery-3f2a");
+		expect(second).toBe("bakery-b81d");
+
+		const long = uniqueAppName(
+			"neighborhood-sourdough-bakery",
+			"3f2a9c1e-0000-4000-8000-000000000000",
+		);
+		expect(long).toBe("neighborhood-sourdo-3f2a");
+		expect(slug.safeParse(long).success).toBe(true);
+		expect(
+			resourceStem({ resourcePrefix: "vibe", user: "demo", appName: long }),
+		).toMatch(/-3f2a$/);
+	});
+});
+
 describe("promptToApp", () => {
 	beforeEach(() => {
 		mocks.architectTask.mockResolvedValue(plan("static_site"));
@@ -546,7 +571,7 @@ describe("promptToApp", () => {
 
 		expect(result).toMatchObject({
 			status: "deployed",
-			webUrl: expect.stringMatching(/demo-shop-web\.onrender\.com$/),
+			webUrl: expect.stringMatching(/demo-shop-run1-web\.onrender\.com$/),
 		});
 		expect(mocks.finishRun).toHaveBeenCalledWith(
 			"run-1",
@@ -581,7 +606,7 @@ describe("promptToApp", () => {
 
 		expect(result).toMatchObject({
 			status: "deployed",
-			apiUrl: expect.stringMatching(/demo-shop-api\.onrender\.com$/),
+			apiUrl: expect.stringMatching(/demo-shop-run1-api\.onrender\.com$/),
 		});
 		expect(startedWith).toEqual(
 			expect.arrayContaining([
@@ -652,8 +677,8 @@ describe("promptToApp", () => {
 
 	it("fails the run before any build or push when the app is being deleted or built by another run", async () => {
 		const refusals = [
-			["deleting", /demo\/shop is being deleted/],
-			["running", /different run is building demo\/shop/],
+			["deleting", /demo\/shop-run1 is being deleted/],
+			["running", /different run is building demo\/shop-run1/],
 		] as const;
 		for (const [reason, summary] of refusals) {
 			mocks.claimRunApp.mockResolvedValueOnce({ claimed: false, reason });
@@ -713,7 +738,7 @@ describe("promptToApp", () => {
 			token,
 			expect.any(String),
 			factoryConfig.branch,
-			["apps/demo/shop", factoryConfig.blueprintPath],
+			[`apps/demo/${APP_NAME}`, factoryConfig.blueprintPath],
 			expect.any(Function),
 		);
 
@@ -729,7 +754,7 @@ describe("promptToApp", () => {
 		expect(commit.get(`${victimDir}/index.html`)).toBe(STOREFRONT_HTML);
 		expect(JSON.parse(commit.get(APP_SPEC) ?? "")).toMatchObject({
 			user: "demo",
-			appName: "shop",
+			appName: APP_NAME,
 			manifest: siteOnly,
 		});
 		expect(commit.get(ROOT_BLUEPRINT)).not.toMatch(/demo-evil/);
@@ -782,18 +807,9 @@ describe("awaitDeployment", () => {
 			[`${APP_DIR}/api/src/index.ts`, "export {};"],
 		]);
 		builderReturns(repair);
-		mocks.deployManagerTask.mockResolvedValue({
-			failures: [
-				{
-					serviceName: "acme-demo-shop-api",
-					status: "pre_deploy_failed",
-					diagnosis: 'npm error Missing script: "migrate"',
-				},
-			],
-		});
 	});
 
-	it("diagnoses a failed deploy, repairs it through verify-app and publish-app, and ends deployed when the new deploy is live", async () => {
+	it("repairs a failed deploy from its logs through verify-app and publish-app, and ends deployed when the new deploy is live", async () => {
 		apiDeployFails();
 		nextDeploys.set(API_ID, { id: "dep-api2", status: "live" });
 		mocks.fetchDeployLogs.mockResolvedValue(
@@ -803,35 +819,17 @@ describe("awaitDeployment", () => {
 		const result = await deploy();
 
 		expect(result.status, result.summary).toBe("deployed");
-		expect(subtasks()).toEqual([
-			"deploy-manager",
-			"builder",
-			"verify-app",
-			"publish-app",
-		]);
+		expect(subtasks()).toEqual(["builder", "verify-app", "publish-app"]);
 		// The Dashboard shows every task input, so the logs arrive redacted.
-		const diagnosed = JSON.stringify(ran[0].input);
-		expect(diagnosed).toContain("npm error Missing script");
-		expect(diagnosed).toContain("[REDACTED]");
-		expect(diagnosed).not.toContain("s3cret");
+		const repairInput = JSON.stringify(ran[0].input);
+		expect(repairInput).toContain("npm error Missing script");
+		expect(repairInput).toContain("[REDACTED]");
+		expect(repairInput).not.toContain("s3cret");
 		expect(pushes).toHaveLength(1);
 		expect(JSON.parse(pushes[0].get(APP_SPEC) ?? "")).toEqual({
 			...spec,
 			manifest: repair,
 		});
-	});
-
-	it("ends deploy_failed without smoke tests when the deploy manager diagnoses no failure", async () => {
-		apiDeployFails();
-		mocks.deployManagerTask.mockResolvedValue({ failures: [] });
-
-		const result = await deploy();
-
-		expect(result.status).toBe("deploy_failed");
-		expect(result.summary).toMatch(/diagnosed no failure/);
-		expect(mocks.buildTask).not.toHaveBeenCalled();
-		expect(pushes).toEqual([]);
-		expect(mocks.waitForHttpOk).not.toHaveBeenCalled();
 	});
 
 	it("pushes nothing and ends deploy_failed when a repair adds a resource", async () => {
@@ -869,8 +867,8 @@ describe("awaitDeployment", () => {
 
 		const result = await deploy({
 			deploysBefore: new Map([
-				["acme-demo-shop-web", "dep-web0"],
-				["acme-demo-shop-api", "dep-api0"],
+				["acme-demo-shop-run1-web", "dep-web0"],
+				["acme-demo-shop-run1-api", "dep-api0"],
 			]),
 			changedServices: ["api"],
 		});
@@ -914,7 +912,7 @@ describe("verifyAppTask", () => {
 		return verifyAppTask.func(tasks, {
 			sandboxId: runSandbox.id,
 			user: "demo",
-			appName: "shop",
+			appName: APP_NAME,
 			manifest,
 			databaseUrl,
 		});
@@ -984,9 +982,9 @@ describe("verifyAppTask", () => {
 
 describe("deleteApp", () => {
 	const SHOP_RESOURCES = [
-		"acme-demo-shop-web",
-		"acme-demo-shop-api",
-		"acme-demo-shop-db",
+		"acme-demo-shop-run1-web",
+		"acme-demo-shop-run1-api",
+		"acme-demo-shop-run1-db",
 	];
 
 	beforeEach(() => {
@@ -1020,7 +1018,7 @@ describe("deleteApp", () => {
 			[...removal.keys()].filter((path) => path.startsWith(`${APP_DIR}/`)),
 		).toEqual([]);
 		expect(removal.get(CAFE_SPEC)).toBe(json(cafe));
-		expect(mocks.deleteRuns).toHaveBeenCalledWith("demo", "shop");
+		expect(mocks.deleteRuns).toHaveBeenCalledWith("demo", APP_NAME);
 	});
 
 	it("deletes no Render resource when the repository has no spec for the app, and still removes its files", async () => {
@@ -1042,14 +1040,14 @@ describe("deleteApp", () => {
 
 	it("marks the app delete_failed, and keeps its runs and files, when a step fails", async () => {
 		mocks.deleteAppResources.mockRejectedValue(
-			new Error("Render did not delete acme-demo-shop-db (403)"),
+			new Error("Render did not delete acme-demo-shop-run1-db (403)"),
 		);
 
 		await expect(deleteApp.func(tasks, SHOP_APP)).rejects.toThrow("(403)");
 
 		expect(mocks.failDelete).toHaveBeenCalledWith(
 			"demo",
-			"shop",
+			APP_NAME,
 			expect.stringMatching(/\(403\)/),
 		);
 		expect(mocks.deleteRuns).not.toHaveBeenCalled();

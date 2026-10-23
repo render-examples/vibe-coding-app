@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentJson } from "../app/claude.js";
-import {
-	deployDiagnosisSchema,
-	deployPlanSchema,
-	manifestSchema,
-	slug,
-} from "../app/contracts.js";
+import { deployPlanSchema, manifestSchema, slug } from "../app/contracts.js";
 
 const plan = {
 	appName: "furniture-catalog",
@@ -157,21 +152,5 @@ describe("manifestSchema", () => {
 				envVarKey: "RENDER_EXTERNAL_HOSTNAME",
 			}),
 		).toBe(false);
-	});
-});
-
-/**
- * The deploy manager runs only after Render reported a failed deploy. An
- * "allHealthy" answer once sent such a run to the smoke checks, which can
- * pass against the last live deploy.
- */
-describe("deployDiagnosisSchema", () => {
-	it("is only a list of failures, with no way to declare the services healthy", () => {
-		expect(
-			deployDiagnosisSchema.parse({ allHealthy: true, failures: [] }),
-		).toEqual({ failures: [] });
-		expect(deployDiagnosisSchema.safeParse({ allHealthy: true }).success).toBe(
-			false,
-		);
 	});
 });

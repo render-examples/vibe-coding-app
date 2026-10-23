@@ -1,5 +1,5 @@
 {
-  "name": "vibe-code-demo",
+  "name": "vibe-coding-app",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -13,6 +13,7 @@
     "dev:workflows": "render workflows dev -- node --env-file=.env node_modules/.bin/tsx app/host.ts",
     "dev:postgres": "docker compose up postgres",
     "db:migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
+    "setup:apps-repo": "node --env-file-if-exists=.env --import tsx scripts/setup-apps-repo.ts",
     "doctor": "node --env-file-if-exists=.env --import tsx scripts/doctor.ts",
     "demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
     "lint": "biome lint --error-on-warnings app public scripts tests factory.config.ts vitest.config.ts",

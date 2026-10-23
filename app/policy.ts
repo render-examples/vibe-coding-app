@@ -1,13 +1,13 @@
 /**
- * The rules for the tool calls of an agent: each path must stay in the app
- * directory or /tmp, and each Render tool must be read-only. No rule reads a
- * shell command. The sandbox limits what a command can reach: it holds only
- * the app of the run, and no credential.
+ * The rules for agent tool calls: every path must stay in the app directory
+ * or /tmp, and every Render tool must be read-only. No rule inspects shell
+ * commands. The sandbox limits what a command can reach: it holds only the
+ * run's app and no credential.
  */
 
 /**
- * The input fields of each tool that hold a path. Other fields, such as the
- * content of a file or a shell command, can hold any text.
+ * The input fields of each tool that hold a path. Other fields, such as file
+ * contents or a shell command, can hold any text.
  */
 const PATH_FIELDS: Readonly<Record<string, readonly string[]>> = {
 	sandbox__read_file: ["path"],
@@ -28,7 +28,7 @@ const SCRATCH_DIR = "/tmp";
  * here, which denies every Render tool not on this list.
  *
  * The list has no log tool: logs can hold secrets, and no code can redact
- * what an agent reads. Workflow code gives the deploy manager redacted logs.
+ * what an agent reads. Workflow code gives the builder redacted deploy logs.
  */
 export const RENDER_READ_ONLY_TOOLS = [
 	"list_workspaces",

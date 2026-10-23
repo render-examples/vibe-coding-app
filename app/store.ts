@@ -22,10 +22,9 @@ export type FinishedStatus = Exclude<
 
 /**
  * Coarse progress for GET /v1/apps/:runId, in pipeline order. Cosmetic;
- * never gates a run. The stage list in public/index.html must list these
- * stages in this order, each with a tooltip, and tests/gateway.test.ts checks
- * it. If the stage of a run is not in that list, the UI shows no progress for
- * the run.
+ * never gates a run. The stage table in public/index.html must list these
+ * stages in this order, and tests/gateway.test.ts checks it. If a run's stage
+ * is not in that table, the UI shows no progress for the run.
  */
 export const RUN_STAGES = [
 	"designing",
@@ -134,10 +133,10 @@ export async function ping(): Promise<void> {
 const RUN_CLAIM_LOCK = 0x76696265;
 
 /**
- * Run statements in one transaction that holds the lock of one app. A delete
- * takes the lock to claim the runs of the app, and a run takes it to claim an
- * app name. So a run cannot start to build an app while it is being deleted,
- * or while a different run builds it.
+ * Run statements in one transaction holding one app's lock. A delete takes
+ * the lock to claim the app's runs, and a run takes it to claim an app name.
+ * So a run cannot start building an app while it is being deleted, or while
+ * another run builds it.
  */
 function withAppLock<T>(
 	user: string,
@@ -179,8 +178,8 @@ async function withLock<T>(
 		await client.query("rollback").catch(() => {});
 		throw error;
 	} finally {
-		// release() attaches the listener of the pool again. If this listener
-		// remains, each transaction on the client adds one more.
+		// release() reattaches the pool's listener. If this one stayed, each
+		// transaction on the client would add another.
 		client.off("error", logError);
 		client.release();
 	}
@@ -192,9 +191,9 @@ async function withLock<T>(
  * should.
  *
  * Under READ COMMITTED, two concurrent inserts each count the running rows
- * without the row of the other, and both can pass the cap. So each claim
- * holds one advisory lock, and a claim counts after the commit of the claim
- * before it.
+ * without seeing the other's row, so both could pass the cap. Each claim
+ * therefore holds one advisory lock and counts only after the previous claim
+ * commits.
  */
 export function claimRun(input: {
 	id: string;
@@ -284,10 +283,10 @@ export async function claimWorkflowCheck(id: string): Promise<boolean> {
 }
 
 /**
- * Record the app that a run builds. Refused while a delete of the same app is
- * in progress, because the delete removes what this run publishes. Also
- * refused while a different run builds the app: the two runs would write the
- * same directory, and each one would wait for the deploys of the other.
+ * Record the app a run builds. Refused while the same app is being deleted,
+ * because the delete would remove what this run publishes. Also refused while
+ * another run builds the app: both would write the same directory and wait on
+ * each other's deploys.
  */
 export async function claimRunApp(
 	id: string,
@@ -484,8 +483,8 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
 		status: row.status as RunStatus,
 		stage: (row.stage as RunStage | null) ?? null,
 		progress: (row.progress as string | null) ?? null,
-		// Postgres writes each time in the JSON with the offset of its session.
-		// Give it in UTC, as the other times of the run are.
+		// Postgres writes JSON timestamps in the session's offset. Return UTC, like
+		// the run's other timestamps.
 		stageHistory: (
 			row.stage_history as { stage: RunStage; started_at: string }[]
 		).map((item) => ({

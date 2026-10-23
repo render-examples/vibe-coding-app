@@ -88,10 +88,39 @@ render workflows tasks list --local
 If the workflow host is not running, submissions fail with
 `dispatch failed`.
 
-### 3. Create the first app
+### 3. Connect the apps Blueprint
+
+This is a one-time step. Render deploys generated apps from a Blueprint that
+watches the apps repository's root `render.yaml`, and Render does not expose
+an API for creating a Blueprint.
+
+First commit an empty root Blueprint to the apps repository:
+
+```bash
+npm run setup:apps-repo
+```
+
+The script does nothing if the file already exists. Then, in the Render
+Dashboard:
+
+1. Open the workspace identified by `RENDER_WORKSPACE_ID`.
+2. Choose **New > Blueprint** and select the apps repository.
+3. Use branch `main` and Blueprint path `render.yaml`.
+4. Keep **Auto Sync** enabled.
+
+These values must match `branch` and `blueprintPath` in
+[`factory.config.ts`](../factory.config.ts). `npm run doctor` confirms the
+Blueprint is watching with Auto Sync on.
+
+If you skip this step, runs still commit their apps but end as
+`awaiting_blueprint`. Connecting the Blueprint later deploys everything
+already committed.
+
+### 4. Create the first app
 
 Open `http://localhost:3000`, sign in with `UI_USERNAME` and `UI_PASSWORD`,
-and submit an idea. The table view at `/table` shows stage timings.
+and submit an idea. The stage table shows how long each stage takes, where it
+runs, and links to the matching Render Dashboard pages.
 
 An embedded preview that cannot show a Basic Auth prompt may use
 `UI_AUTH_DISABLED=true` locally. The gateway ignores that setting in
@@ -111,35 +140,24 @@ A brochure or landing-page prompt usually produces one static site. A prompt
 that explicitly requires persistent user-written data produces a site, API,
 and Postgres database.
 
-The first successful build normally ends as `awaiting_blueprint`. The code is
-in the apps repository, but no Render Blueprint watches it yet.
+A successful run finishes as `deployed` only after the workflow smoke-tests
+the public site and, when present, its API.
 
-## Connect the apps Blueprint
-
-This is a one-time manual step. Render does not expose an API for creating a
-Blueprint.
-
-1. Open the workspace identified by `RENDER_WORKSPACE_ID`.
-2. Choose **New > Blueprint** and select the apps repository.
-3. Use branch `main` and Blueprint path `render.yaml`.
-4. Keep **Auto Sync** enabled.
-
-These values must match `branch` and `blueprintPath` in
-[`factory.config.ts`](../factory.config.ts).
-
-Creating the Blueprint syncs the root `render.yaml` already committed by the
-first run. Submit another idea to exercise the complete path. A successful
-run finishes as `deployed` only after the workflow smoke-tests the public
-site and, when present, its API.
-
-Each app gets its own Render project:
+Each app gets its own Render project. The app name is the architect's slug
+plus the first four characters of the run ID, so two similar prompts never
+overwrite each other's app:
 
 ```text
-vibe-<user>-<app>
-├── vibe-<user>-<app>-web
-├── vibe-<user>-<app>-api     # when needed
-└── vibe-<user>-<app>-db      # when needed
+vibe-<user>-<app>-<run>
+├── vibe-<user>-<app>-<run>-web
+├── vibe-<user>-<app>-<run>-api     # when needed
+└── vibe-<user>-<app>-<run>-db      # when needed
 ```
+
+Generated static sites are free. An API uses the `0.5c-512mb` plan and a
+database the `0.1c-256mb` plan from
+[`factory.config.ts`](../factory.config.ts), and both bill until you delete
+the app.
 
 ## Deploy the factory to Render
 
@@ -166,7 +184,10 @@ Keep these deployment constraints:
 - Only one factory using the default workflow service name can exist in a
   workspace.
 - The apps Blueprint must exist in the workspace identified by
-  `RENDER_WORKSPACE_ID`.
+  `RENDER_WORKSPACE_ID`. If you have not connected it yet, follow
+  [Connect the apps Blueprint](#3-connect-the-apps-blueprint).
+  `npm run setup:apps-repo` needs only `APPS_REPO` and a GitHub credential in
+  your local `.env`.
 
 After deployment, open the gateway URL or point the demo client at it:
 

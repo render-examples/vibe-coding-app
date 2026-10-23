@@ -226,7 +226,7 @@ describe("POST /v1/apps", () => {
 });
 
 describe("browser UI", () => {
-	const pages = ["/", "/table", "/app.js", "/table.js", "/runs.js"];
+	const pages = ["/", "/app.js"];
 
 	it("requires Basic Auth for every UI file and route, and serves no file that holds FACTORY_API_KEY", async () => {
 		for (const path of [...pages, "/style.css", "/ui/apps"]) {
@@ -266,19 +266,8 @@ describe("browser UI", () => {
 		expect(mocks.deleteRunWithoutApp).not.toHaveBeenCalled();
 	});
 
-	it("lists every stage of RUN_STAGES in order in the stage list and the stage table", async () => {
-		const index = await (await request("/", { authorization: UI_AUTH })).text();
-		const items = [
-			...index.matchAll(/<li data-stage="([a-z_]+)">([\s\S]*?)<\/li>/g),
-		];
-		expect(items.map(([, stage]) => stage)).toEqual(RUN_STAGES);
-		for (const [, stage, item] of items) {
-			expect(item, stage).toContain('role="tooltip"');
-		}
-
-		const table = await (
-			await request("/table", { authorization: UI_AUTH })
-		).text();
+	it("lists every stage of RUN_STAGES in order in the stage table", async () => {
+		const table = await (await request("/", { authorization: UI_AUTH })).text();
 		const rows = [
 			...table.matchAll(/<tr data-stage="([a-z_]+)">([\s\S]*?)<\/tr>/g),
 		];

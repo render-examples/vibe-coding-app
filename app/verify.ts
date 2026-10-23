@@ -1,6 +1,6 @@
 /**
- * verify-app: build, boot, and query the app in the sandbox of the run, as
- * Render will. A check that fails is a result, not an error.
+ * verify-app: build, boot, and query the app in the run's sandbox, the way
+ * Render will. A failed check is a result, not an error.
  */
 import { type TaskContext, task } from "@renderinc/sdk/workflows";
 import { appPath } from "../factory.config.js";
@@ -31,13 +31,12 @@ interface VerificationResult {
 }
 
 /**
- * Verify the builder's files in the sandbox. A check that fails is a result,
- * not an error: the parent gives the failures to the builder, or it ends the
- * run.
+ * Verify the builder's files in the sandbox. A failed check is a result, not
+ * an error: the parent sends the failures to the builder, or ends the run.
  *
- * Render does not retry it. A retry after a timeout runs every build again.
- * And a service that the failed attempt started can still answer on the port
- * of the next boot, so a retry can pass a check that failed.
+ * Render does not retry it. A retry after a timeout reruns every build, and a
+ * service the failed attempt started could still answer on the next boot's
+ * port, so a retry could pass a check that failed.
  */
 export const verifyAppTask = task(
 	{
@@ -88,8 +87,8 @@ export const verifyAppTask = task(
  *   Postgres, and require the endpoint to answer with data
  * - Check for placeholder content in built output
  *
- * Last, it reads the files as publish-app does, so that the builder can fix
- * what publish-app would refuse: a symbolic link, for example.
+ * Last, it reads the files the way publish-app does, so the builder can fix
+ * anything publish-app would refuse, such as a symbolic link.
  */
 async function verify(
 	sandbox: Sandbox,
@@ -111,8 +110,8 @@ async function verify(
 	}
 
 	// Render's build gets only what the commit holds. Delete every ignored file
-	// first, so that a file the build needs but a commit leaves out fails here
-	// and not in a deploy.
+	// first, so a file the build needs but the commit leaves out fails here,
+	// not in a deploy.
 	await sandbox.writeFile(`${appDir}/.gitignore`, appGitignore(manifest));
 	await removeIgnored(sandbox, appDir);
 
@@ -193,11 +192,11 @@ async function runVerification(
 
 /**
  * A static site gets its env vars at build time, and a browser uses them. The
- * sandbox build passes with a private-network address in the bundle. Without
- * this check, only smokeStorefront() finds the fault, after the Blueprint has
- * created every resource. The builder must make the fix, because the
- * storefront code must agree with the value. Web services can use these
- * properties, because they connect on the private network.
+ * sandbox build passes with a private-network address in the bundle, so
+ * without this check only smokeStorefront() would catch it, after the
+ * Blueprint has created every resource. The builder must make the fix,
+ * because the storefront code has to agree with the value. Web services may
+ * use these properties, because they are on the private network.
  */
 export function checkStaticSiteEnvVars(service: Service): string[] {
 	if (service.kind !== "static_site") return [];

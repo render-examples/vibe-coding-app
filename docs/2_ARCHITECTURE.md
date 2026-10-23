@@ -88,14 +88,14 @@ app/
   images.ts                   Bounded Wikimedia search and download
   config.ts                   Environment parsing and process-specific validation
 public/
-  index.html, app.js           Stage-oriented UI
-  table.html, table.js         Tabular UI
-  runs.js                     Shared rendering and polling helpers
+  index.html, app.js          Run table and per-stage timing UI
+  style.css                   Styles
 templates/fullstack/
   web/                        Vite + React storefront
   api/                        Hono + Postgres API
 scripts/
   migrate.ts                  Apply app/schema.sql
+  setup-apps-repo.ts          Commit the empty root Blueprint before the first run
   doctor.ts                   Read-only configuration and integration diagnostics
   demo.ts                     Submit and poll a prompt
   support.ts                  Shared script helpers
@@ -128,7 +128,7 @@ The public routes are:
 - `POST /v1/apps`: start an app run with bearer authentication.
 - `GET /v1/apps/:runId`: read and reconcile a run.
 - `DELETE /v1/apps/:runId`: delete the run's app.
-- `/ui/*`, `/`, and `/table`: Basic-Auth browser surface scoped to
+- `/ui/*` and `/`: Basic-Auth browser surface scoped to
   `UI_USERNAME`.
 
 The gateway holds `FACTORY_API_KEY`, `RENDER_API_KEY`, and `DATABASE_URL`, but
@@ -179,8 +179,10 @@ It returns a `DeployPlan`: app name, summary, required primitives, asset
 queries, and a product brief. `agentJson()` validates the response with Zod,
 asks for one schema repair if needed, and then fails closed.
 
-`claimRunApp()` records the app name under a per-app advisory lock. It refuses
-to build an app currently being built or deleted.
+`uniqueAppName()` appends the first four characters of the run ID to the
+architect's slug, so two similar prompts never write to the same app.
+`claimRunApp()` records the name under a per-app advisory lock. It refuses to
+build an app currently being built or deleted.
 
 #### 3. Prepare an isolated build Sandbox
 
@@ -256,17 +258,18 @@ Render's apps Blueprint sees the push and creates or updates the app project.
 2. Returns `awaiting_blueprint` if no such Blueprint exists.
 3. Waits for every expected service to appear.
 4. Waits for deploys caused by the new commit.
-5. On a failed deploy, fetches and redacts that deploy's logs, asks the
-   `deploy-manager` for a diagnosis, and gives the diagnosis to the builder.
+5. On a failed deploy, fetches and redacts that deploy's logs and gives them
+   to the builder.
 6. Re-verifies and republishes a bounded repair.
 
 The first wait records deploy IDs before publishing so an old live deploy
 cannot be mistaken for the result of the new commit. A repair waits only for
 deploys newer than the failed deploy.
 
-The deploy manager is advisory. An empty diagnosis cannot override a failed
-Render deploy status, and a repair cannot change the declared set or runtime
-of resources.
+The builder reads logs only through workflow code: no agent has a log tool,
+because logs can hold secrets the factory must redact first. A repair cannot
+change the declared set or runtime of resources, and only a new `live` deploy
+status ends the loop.
 
 #### 7. Smoke-test the public application
 
@@ -362,7 +365,7 @@ Workflow code binds the context; the model supplies only validated tool
 input. File tools resolve paths inside `workDir` or `/tmp`.
 
 The builder receives read, write, list, search, exec, and patch tools. The
-architect and deploy manager receive no Sandbox tools. Builder shell commands
+architect receives no Sandbox tools. Builder shell commands
 have their own 10-minute limit, shorter than the builder task and parent
 workflow deadlines.
 
@@ -479,6 +482,7 @@ The suite tests public behavior and boundaries:
 - `workflow.test.ts`: create, repair, deploy, and delete orchestration.
 - `blueprint.test.ts`: generated infrastructure contract.
 - `agents.test.ts`, `policy.test.ts`, `tools.test.ts`: capability boundaries.
+- `contracts.test.ts`: schema rules and the one-repair `agentJson()` path.
 - `git.test.ts`, `files.test.ts`, `github-auth.test.ts`: publish boundary.
 - `render.test.ts`, `teardown.test.ts`, `images.test.ts`: external systems.
 - `store.test.ts`: claims, locks, and connection failure behavior.

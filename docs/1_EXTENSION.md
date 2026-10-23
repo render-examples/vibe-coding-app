@@ -85,12 +85,11 @@ code.
 `agentTask()` definitions are Render task objects, not ordinary functions.
 Always run them through the parent task's `TaskContext`.
 
-The existing roles illustrate three capability profiles:
+The two existing roles illustrate opposite capability profiles:
 
 - `architect`: read-only Render MCP, no Sandbox.
-- `builder`: six scoped Sandbox tools, no Render MCP.
-- `deploy-manager`: read-only Render MCP plus redacted logs supplied by
-  workflow code.
+- `builder`: six scoped Sandbox tools, no Render MCP. During a deploy repair
+  it also receives redacted deploy logs supplied by workflow code.
 
 Do not grant an agent direct log access. Logs can contain secrets. The deploy
 repair path fetches logs in trusted workflow code, redacts them, limits their
@@ -179,7 +178,7 @@ When adding a stage:
 - decide whether it needs judgment (agent task) or deterministic code;
 - keep its input and result small and JSON-serializable;
 - add a bounded timeout and make repeated execution safe;
-- update `RUN_STAGES` and both browser views when it is user-visible;
+- update `RUN_STAGES` and the UI's stage table when it is user-visible;
 - preserve Sandbox cleanup in `finally`; and
 - add a workflow test that exercises the public outcome.
 
@@ -241,7 +240,7 @@ For UI changes:
 - never serialize `FACTORY_API_KEY` into HTML or JavaScript;
 - ignore a browser-supplied `user` and use `UI_USERNAME`;
 - keep Postgres as the source of truth; and
-- update both the classic and table views when changing stages.
+- add a row to the stage table in `public/index.html` when changing stages.
 
 A production multi-tenant service needs real identity, authorization,
 per-tenant quotas, and abuse prevention in front of `claimRun()`. User slugs

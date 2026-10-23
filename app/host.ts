@@ -9,4 +9,4 @@ assertWorkflowEnv();
 // await in these modules, lets the server start first and leaves tasks out.
 await import("./workflow.js");
 
-console.log("vibe code factory workflows ready");
+console.log("vibe-coding-app workflows ready");

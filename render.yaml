@@ -52,7 +52,7 @@ projects:
           - type: workflow
             name: vibe-factory-workflows
             runtime: node
-            repo: https://github.com/render-examples/vibe-code-demo
+            repo: https://github.com/render-examples/vibe-coding-app
             # A workflow must set its region. Task runs connect to the database
             # on the private network, and that network does not cross regions.
             # Use the same region as the database, which is oregon by default.

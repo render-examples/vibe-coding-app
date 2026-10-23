@@ -51,7 +51,7 @@ export interface CommonsCandidate {
 
 /**
  * Find one photograph for each subject, and download it into the assets
- * directory of the app. All subjects search at one time. A subject that
+ * directory of the app. All subjects search at once. A subject that
  * finds nothing, or whose download fails, is left out.
  */
 export async function collectImages(

@@ -52,7 +52,7 @@ export function apiKey(): string {
 export function uiCredentials(): { username: string; password: string } {
 	const username = requireEnv("UI_USERNAME");
 	const password = requireEnv("UI_PASSWORD");
-	// The gateway gives it to every run of the UI as the namespace `user`.
+	// The gateway uses it as the `user` namespace for every UI run.
 	if (!slug.safeParse(username).success) {
 		throw new Error("UI_USERNAME must be a lowercase slug");
 	}

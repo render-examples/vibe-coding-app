@@ -22,7 +22,6 @@ const TASKS = [
 	"builder",
 	"delete-app",
 	"delete-app-resources",
-	"deploy-manager",
 	"prompt-to-app",
 	"publish-app",
 	"remove-app-files",

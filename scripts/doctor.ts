@@ -263,9 +263,9 @@ async function checkBlueprint(): Promise<void> {
 				level: "fail",
 				message: `No Blueprint in workspace ${workspaceId} watches ${repo.fullName} (${factoryConfig.branch}:${factoryConfig.blueprintPath})`,
 				fix:
-					"Create it once in that workspace in the Render Dashboard: New > Blueprint, pick the apps " +
-					`repository, branch ${factoryConfig.branch}, Blueprint Path ${factoryConfig.blueprintPath}. ` +
-					"Until then runs commit their app but stop at awaiting_blueprint.",
+					"Run npm run setup:apps-repo, then create the Blueprint once in that workspace in the Render " +
+					`Dashboard: New > Blueprint, pick the apps repository, branch ${factoryConfig.branch}, ` +
+					`Blueprint Path ${factoryConfig.blueprintPath}. Until then runs commit their app but stop at awaiting_blueprint.`,
 			});
 			return;
 		}
@@ -293,9 +293,8 @@ async function checkBlueprint(): Promise<void> {
 }
 
 /**
- * The architect and the deploy manager read Render through the MCP server.
- * If it does not have a tool on the allowlist, those agents lose it and no
- * error shows it.
+ * The architect reads Render through the MCP server. If the server lacks a
+ * tool on the allowlist, the architect silently loses it.
  */
 async function checkRenderMcp(): Promise<void> {
 	heading("Render MCP");
@@ -420,7 +419,6 @@ async function checkTasks(): Promise<void> {
 		const expected = [
 			"architect",
 			"builder",
-			"deploy-manager",
 			"prompt-to-app",
 			"verify-app",
 			"publish-app",

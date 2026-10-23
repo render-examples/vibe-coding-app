@@ -3,7 +3,7 @@
  *
  * The gateway runs no models, creates or deletes no infrastructure, and holds
  * no repository credential. It authenticates the caller, claims the run in
- * Postgres, and dispatches a prompt, or the delete of the run's app.
+ * Postgres, and dispatches either a prompt or the delete of the run's app.
  */
 import { randomUUID } from "node:crypto";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -99,15 +99,12 @@ export function createGateway(): Hono {
 	app.delete("/ui/apps/:runId", (c) =>
 		deleteRun(c, "/ui/apps", credentials.username),
 	);
-	// Each page and script expects the others from the same deploy. A cached
-	// script from an earlier deploy looks up elements the new page lacks.
+	// The page and its script must come from the same deploy. A cached script
+	// from an earlier deploy looks up elements the new page lacks.
 	const uiFile = (path: string) =>
 		[uiAuth, noCache, serveStatic({ path: `./public/${path}` })] as const;
 	app.get("/", ...uiFile("index.html"));
-	app.get("/table", ...uiFile("table.html"));
 	app.get("/app.js", ...uiFile("app.js"));
-	app.get("/table.js", ...uiFile("table.js"));
-	app.get("/runs.js", ...uiFile("runs.js"));
 	app.get("/style.css", ...uiFile("style.css"));
 
 	return app;
@@ -140,9 +137,9 @@ async function listRuns(
 }
 
 /**
- * Claim a run and dispatch prompt-to-app. `statusBase` is the route prefix of
- * the caller. The UI gives `userOverride`, the namespace of its Basic Auth
- * user, because a browser must not choose one.
+ * Claim a run and dispatch prompt-to-app. `statusBase` is the caller's route
+ * prefix. The UI passes `userOverride`, its Basic Auth user's namespace,
+ * because a browser must not choose one.
  */
 async function createRun(
 	c: Context,
@@ -370,8 +367,8 @@ export function runResponse(
 		finishedAt: run.finishedAt,
 		links: {
 			// The task run that owns the status: prompt-to-app, or delete-app while
-			// the app is deleted. The Dashboard shows the subtasks of a run on its
-			// page. The SDK does not give the ID of a subtask run.
+			// the app is being deleted. The Dashboard lists a run's subtasks on its
+			// page, and the SDK does not return subtask run IDs.
 			workflowRun:
 				workflowId && run.workflowRunId
 					? `${DASHBOARD}/wf/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(run.workflowRunId)}`

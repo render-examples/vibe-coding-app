@@ -1,6 +1,6 @@
 /**
  * The four steps of delete-app. removeApp() in app/workflow.ts runs them in
- * order, and AGENTS.md tells why the order is as it is.
+ * order and explains why the order matters.
  */
 import { type TaskContext, task } from "@renderinc/sdk/workflows";
 import {
@@ -25,20 +25,16 @@ import { type Sandbox, shellEscape } from "./sandbox.js";
 import { setDeleteProgress } from "./store.js";
 import { deleteAppResources, waitForBlueprintSyncs } from "./teardown.js";
 
-/**
- * A step of a delete makes one push, waits for the syncs of the Blueprint, or
- * makes the deletes on Render.
- */
+/** Each delete step makes one push, waits for Blueprint syncs, or deletes resources. */
 export const DELETE_STEP_TIMEOUT_SECONDS = 10 * 60;
-/** How long an unfinished sync of the apps Blueprint gets before a delete. */
+/** How long an unfinished apps Blueprint sync may run before the delete gives up. */
 const SYNC_TIMEOUT_MS = 6 * 60 * 1000;
 
 /**
- * The options of each step. Render does not retry a step: a failed step
- * fails the delete, and the next attempt starts again at the first step. A
- * retry of the first step after its push finds nothing to commit, so the wait
- * would not wait for the push event. A retry of the wait would give a sync
- * more time than SYNC_TIMEOUT_MS.
+ * Render does not retry a step: a failed step fails the delete, and the next
+ * attempt starts again at the first step. A retried first step would find
+ * nothing to commit after its push, so the wait would not know when the push
+ * happened. A retried wait would give a sync more than SYNC_TIMEOUT_MS.
  */
 const DELETE_STEP = {
 	plan: "flex",
@@ -47,7 +43,7 @@ const DELETE_STEP = {
 };
 
 interface RemovedFromBlueprint {
-	/** As in factory.json. It is in the name of each Render resource of the app. */
+	/** From factory.json. Every Render resource name of the app starts with it. */
 	resourcePrefix: string;
 	/** The commit that took the app out, or null if an earlier attempt pushed it. */
 	commit: string | null;
@@ -57,9 +53,9 @@ interface RemovedFromBlueprint {
 
 /**
  * Write deletedAt into the app's factory.json, and push a root Blueprint that
- * leaves the app out. The commit changes only these two files: a commit that
- * removed the source of a service would start a build of it, and that build
- * would fail before the service is deleted.
+ * leaves the app out. The commit changes only these two files: removing a
+ * service's source would start a build of it, and that build would fail
+ * before the service is deleted.
  *
  * Returns null when the repository has no spec for the app. Only the spec
  * names the resources, so then no step deletes anything on Render.
@@ -118,9 +114,9 @@ export const removeFromBlueprintTask = task(
 );
 
 /**
- * Wait until no sync of the apps Blueprint waits or runs. When no Blueprint
- * watches the apps repository, no sync can bring a resource back, and there
- * is nothing to wait for.
+ * Wait until no apps Blueprint sync is pending or running. When no Blueprint
+ * watches the apps repository, no sync can bring a resource back, so there is
+ * nothing to wait for.
  */
 export const waitForSyncsTask = task(
 	{ name: "wait-for-blueprint-syncs", ...DELETE_STEP },
@@ -202,9 +198,9 @@ export const removeFilesTask = task(
 );
 
 /**
- * The spec of one app in the clone, or null when the repository has no spec
- * for it. The names of the resources to delete come from this file, so a
- * file that names a different app stops the delete.
+ * One app's spec in the clone, or null when the repository has none. The
+ * resource names to delete come from this file, so a file that names a
+ * different app stops the delete.
  */
 async function readSpec(
 	sandbox: Sandbox,

@@ -2,11 +2,7 @@
 import { type TaskContext, task } from "@renderinc/sdk/workflows";
 import { factoryConfig } from "../factory.config.js";
 import { type Agent, md, runClaude, zodToJsonSchema } from "./claude.js";
-import {
-	buildOutputSchema,
-	deployDiagnosisSchema,
-	deployPlanSchema,
-} from "./contracts.js";
+import { buildOutputSchema, deployPlanSchema } from "./contracts.js";
 import { RENDER_READ_ONLY_TOOLS } from "./policy.js";
 import { connectSandbox } from "./sandbox.js";
 import { sandboxTools } from "./tools.js";
@@ -138,7 +134,8 @@ export const builder: Agent = {
 		  .git directory in the app directory; copy a file instead of linking
 		  to it.
 		- When you receive build output or Render deploy logs describing a
-		  failure, fix exactly what the output names and nothing else.
+		  failure, find the first real error, fix exactly what it names, and
+		  nothing else. Deploy logs show each secret as [REDACTED].
 
 		When the app has a database:
 
@@ -197,42 +194,6 @@ export const builder: Agent = {
 	`,
 };
 
-export const deployManager: Agent = {
-	id: "deploy-manager",
-	model: "medium",
-	effort: "low",
-	renderTools: RENDER_READ_ONLY_TOOLS,
-	maxTurns: 20,
-	timeoutSeconds: 15 * 60,
-	plan: "flex",
-	prompt: md`
-		You are the deploy manager. You diagnose Render deploys that failed.
-
-		Your instructions give each service that failed: its name and ID, the
-		ID and the status of the deploy that failed, and the last lines of the
-		logs of that deploy. They can include the build, the pre-deploy
-		command, and the new instance. Each secret in them is [REDACTED]. Your
-		Render tools cannot read logs. Use them only to read the settings of a
-		service and the details of a deploy.
-
-		For each service that failed, find the error in its logs. Then tell the
-		builder what to fix. Be specific: quote the exact error from the logs.
-		If the logs do not show the cause, say so.
-
-		Respond ONLY with JSON, with one entry for each service that failed:
-		{
-		  "failures": [
-		    {
-		      "serviceName": "the service that failed",
-		      "status": "build_failed",
-		      "diagnosis": "exact error and what to fix",
-		      "logs": "relevant log excerpt"
-		    }
-		  ]
-		}
-	`,
-};
-
 /* ── Registration ─────────────────────────────────────────────────────── */
 
 export interface AgentTaskInput {
@@ -249,7 +210,6 @@ export interface AgentTaskInput {
 const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
 	architect: zodToJsonSchema(deployPlanSchema),
 	builder: zodToJsonSchema(buildOutputSchema),
-	"deploy-manager": zodToJsonSchema(deployDiagnosisSchema),
 };
 
 /**
@@ -295,8 +255,8 @@ export function agentTask(agent: Agent) {
 				}),
 			);
 
-			// The output that the SDK checked against the schema of the agent, or
-			// the text of an agent that has no schema.
+			// The output the SDK checked against the agent's schema, or the text
+			// of an agent that has none.
 			return run.structuredOutput ?? run.result;
 		},
 	);
@@ -304,4 +264,3 @@ export function agentTask(agent: Agent) {
 
 export const architectTask = agentTask(architect);
 export const buildTask = agentTask(builder);
-export const deployManagerTask = agentTask(deployManager);
