@@ -1,5 +1,6 @@
 /** Environment parsing and per-process validation. */
 import { slug } from "./contracts.js";
+import { githubPat, usingGitHubApp } from "./github.js";
 
 const REPO_PATTERN =
 	/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
@@ -68,16 +69,7 @@ export function renderWorkspaceId(): string {
 
 /** Either a GitHub App installation or a fine-grained PAT, not neither. */
 function requireGitHubCredentials(): void {
-	const app =
-		process.env.GITHUB_APP_ID?.trim() &&
-		process.env.GITHUB_APP_PRIVATE_KEY?.trim() &&
-		process.env.GITHUB_APP_INSTALLATION_ID?.trim();
-	if (app || process.env.GITHUB_TOKEN?.trim()) return;
-
-	throw new Error(
-		"No GitHub credentials. Set GITHUB_TOKEN, or GITHUB_APP_ID, " +
-			"GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID.",
-	);
+	if (!usingGitHubApp()) githubPat();
 }
 
 /** Fail fast if the gateway is misconfigured. */

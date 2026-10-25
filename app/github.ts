@@ -93,17 +93,7 @@ export async function githubToken(
 	fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
 	const credentials = appCredentials();
-
-	if (!credentials) {
-		const pat = process.env.GITHUB_TOKEN?.trim();
-		if (!pat) {
-			throw new Error(
-				"No GitHub credentials. Set GITHUB_TOKEN, or GITHUB_APP_ID, " +
-					"GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID.",
-			);
-		}
-		return pat;
-	}
+	if (!credentials) return githubPat();
 
 	if (cachedToken && cachedToken.expiresAt - REFRESH_MARGIN_MS > Date.now()) {
 		return cachedToken.token;
@@ -115,6 +105,18 @@ export async function githubToken(
 /** True when the factory acts as a GitHub App rather than a user. */
 export function usingGitHubApp(): boolean {
 	return appCredentials() !== null;
+}
+
+/** The PAT, which the factory uses when no GitHub App is configured. */
+export function githubPat(): string {
+	const pat = process.env.GITHUB_TOKEN?.trim();
+	if (!pat) {
+		throw new Error(
+			"No GitHub credentials. Set GITHUB_TOKEN, or GITHUB_APP_ID, " +
+				"GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID.",
+		);
+	}
+	return pat;
 }
 
 /** Test seam. */
