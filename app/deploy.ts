@@ -513,7 +513,17 @@ async function smokeStorefront(
 ): Promise<string | null> {
 	if (!webUrl) return null;
 	const apiHost = new URL(apiUrl).hostname;
-	if (await pageContains(webUrl, apiHost)) return null;
+	let found: boolean;
+	try {
+		found = await pageContains(webUrl, apiHost);
+	} catch (error) {
+		return (
+			`${webUrl} answered once, but a later read of the page or its scripts kept failing, so the workflow ` +
+			`could not check it for the API hostname ${apiHost}. ` +
+			`${error instanceof Error ? error.message : String(error)}`
+		);
+	}
+	if (found) return null;
 	return (
 		`${webUrl} does not contain the API hostname ${apiHost} in its HTML or in the scripts that it loads. ` +
 		"A browser cannot find the API. Set the storefront env var with fromService envVarKey RENDER_EXTERNAL_HOSTNAME. " +

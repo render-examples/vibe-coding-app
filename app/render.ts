@@ -338,15 +338,20 @@ export async function waitForHttpOk(
  * Whether a deployed page contains `text` in its HTML or in a script that it
  * loads. A static site gets its env vars at build time, so its bundle is the
  * only place that shows the values that a browser uses.
+ *
+ * A page or script that the server says is not there does not contain the
+ * text. A read that fails for another reason is tried again, as retryRead()
+ * describes, and then throws: a failed request is not proof that the text is
+ * missing.
  */
 export async function pageContains(
 	pageUrl: string,
 	text: string,
 ): Promise<boolean> {
-	const html = await readText(pageUrl);
+	const html = await readPage(pageUrl);
 	if (html === null) return false;
 	if (html.includes(text)) return true;
-	const scripts = await Promise.all(pageScripts(html, pageUrl).map(readText));
+	const scripts = await Promise.all(pageScripts(html, pageUrl).map(readPage));
 	return scripts.some((script) => script?.includes(text));
 }
 
@@ -373,14 +378,21 @@ export function pageScripts(html: string, pageUrl: string): string[] {
 	return [...scripts].slice(0, MAX_PAGE_SCRIPTS);
 }
 
-/** The full body of a successful GET, or null. */
+function readPage(url: string): Promise<string | null> {
+	return retryRead(`Reading ${url}`, () => readText(url));
+}
+
+/**
+ * The full body of a successful GET, or null when the server answers that the
+ * page is not there. A network error, a 429, or a 5xx throws.
+ */
 async function readText(url: string): Promise<string | null> {
-	try {
-		const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-		return response.ok ? await response.text() : null;
-	} catch {
-		return null;
+	const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+	if (response.ok) return await response.text();
+	if (response.status === 429 || response.status >= 500) {
+		throw new Error(`GET ${url} failed with ${response.status}`);
 	}
+	return null;
 }
 
 /* ── REST API ─────────────────────────────────────────────────────────── */

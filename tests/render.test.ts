@@ -235,6 +235,29 @@ describe("pageContains", () => {
 			expect(new URL(String(url)).origin).toBe(PAGE);
 		}
 	});
+
+	// A failed read is not proof that the text is missing: the smoke check
+	// would end a working app with advice to change correct wiring.
+	it("reads a page again after a temporary failure, and throws when it keeps failing", async () => {
+		const page = `<script type="module" src="/assets/index-B1x2.js"></script>`;
+		let scriptReads = 0;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (url: string | URL | Request) => {
+				if (String(url) === PAGE) return new Response(page);
+				scriptReads++;
+				if (scriptReads === 1) throw new TypeError("fetch failed");
+				if (scriptReads === 2) return new Response("", { status: 503 });
+				return new Response(`const b="https://${API_HOST}";`);
+			}),
+		);
+		expect(await settle(pageContains(PAGE, API_HOST))).toBe(true);
+
+		renderAnswers(() => new Response("", { status: 503 }));
+		await expect(settle(pageContains(PAGE, API_HOST))).rejects.toThrow(
+			"failed 5 times in sequence",
+		);
+	});
 });
 
 describe("fetchDeployLogs", () => {
