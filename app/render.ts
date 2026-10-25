@@ -416,7 +416,7 @@ export function renderApi(
  * One read of the Render REST API. An error status is a RenderApiError, so
  * that retryRead() can tell an authentication failure from a temporary one.
  */
-async function readApi<T>(path: string, what: string): Promise<T> {
+export async function readApi<T>(path: string, what: string): Promise<T> {
 	const response = await renderApi(path);
 	if (!response.ok) {
 		const hint = AUTH_FAILURES.has(response.status)

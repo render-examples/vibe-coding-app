@@ -24,6 +24,7 @@ import type { DeleteResourcesInput } from "./contracts.js";
 import {
 	type BlueprintSync,
 	listBlueprintSyncs,
+	readApi,
 	renderApi,
 	retryRead,
 } from "./render.js";
@@ -141,13 +142,15 @@ export async function waitForBlueprintSyncs(
 /**
  * Delete the services and databases of one app, then its project. Call it
  * only after waitForBlueprintSyncs, when no sync can recreate what it deletes.
+ * A read that fails is tried again, as retryRead() describes, and each failed
+ * attempt is reported as delete progress.
  */
 export async function deleteAppResources(
 	app: DeleteResourcesInput,
 	opts: TeardownOptions,
 ): Promise<string[]> {
 	const stem = resourceStem(app);
-	const projects = await findProjects(stem, opts.workspaceId);
+	const projects = await findProjects(stem, opts);
 	if (projects.length === 0) {
 		console.log(
 			JSON.stringify({ event: "render_project_not_found", name: stem }),
@@ -158,10 +161,7 @@ export async function deleteAppResources(
 	for (const project of projects) {
 		const foreign: string[] = [];
 		for (const environmentId of project.environmentIds) {
-			for (const resource of await environmentResources(
-				environmentId,
-				opts.workspaceId,
-			)) {
+			for (const resource of await environmentResources(environmentId, opts)) {
 				// Every name the factory gives the app starts with its stem. A
 				// resource with a different name stays, and so does the project.
 				if (!resource.name.startsWith(`${stem}-`)) {
@@ -200,12 +200,13 @@ function unfinishedSyncs(syncs: readonly BlueprintSync[]): string[] {
 /** Only an exact match counts, whatever the API's name filter matches. */
 async function findProjects(
 	name: string,
-	workspaceId: string,
+	opts: TeardownOptions,
 ): Promise<Project[]> {
-	const entries = await list<{ project?: Project }>("projects", {
-		name,
-		ownerId: workspaceId,
-	});
+	const entries = await list<{ project?: Project }>(
+		"projects",
+		{ name, ownerId: opts.workspaceId },
+		opts.onProgress,
+	);
 	return entries.flatMap(({ project }) =>
 		project?.name === name ? [project] : [],
 	);
@@ -214,16 +215,18 @@ async function findProjects(
 /** The services and databases of one environment, services first. */
 async function environmentResources(
 	environmentId: string,
-	workspaceId: string,
+	opts: TeardownOptions,
 ): Promise<Resource[]> {
-	const filter = { environmentId, ownerId: workspaceId };
+	const filter = { environmentId, ownerId: opts.workspaceId };
 	const services = await list<{ service?: { id: string; name: string } }>(
 		"services",
 		filter,
+		opts.onProgress,
 	);
 	const databases = await list<{ postgres?: { id: string; name: string } }>(
 		"postgres",
 		filter,
+		opts.onProgress,
 	);
 	return [
 		...services.flatMap(({ service }) =>
@@ -252,18 +255,17 @@ async function environmentResources(
 }
 
 /** One page. An app has far fewer resources than a page holds. */
-async function list<T>(
+function list<T>(
 	collection: string,
 	filter: Record<string, string>,
+	onRetry?: (detail: string) => void | Promise<void>,
 ): Promise<T[]> {
 	const query = new URLSearchParams({ ...filter, limit: "100" });
-	const response = await renderApi(`/${collection}?${query}`);
-	if (!response.ok) {
-		throw new Error(
-			`Listing ${collection} failed with ${response.status}: ${await detail(response)}`,
-		);
-	}
-	return (await response.json()) as T[];
+	return retryRead(
+		`The ${collection} lookup`,
+		() => readApi<T[]>(`/${collection}?${query}`, `Listing ${collection}`),
+		onRetry,
+	);
 }
 
 async function deleteResource(resource: Resource): Promise<void> {

@@ -23,6 +23,8 @@ interface Workspace {
 	deleteStatus: Record<string, number>;
 	/** GET .../syncs answers these states in order, then repeats the last. */
 	syncStates: string[];
+	/** The next GETs of each path answer 500, this many times. */
+	readFailures: Record<string, number>;
 }
 
 let workspace: Workspace;
@@ -42,6 +44,10 @@ function serve(): void {
 				deleted.push(path);
 				const status = workspace.deleteStatus[path] ?? 204;
 				return new Response(status === 204 ? null : "refused", { status });
+			}
+			if (workspace.readFailures[path] > 0) {
+				workspace.readFailures[path]--;
+				return new Response("unavailable", { status: 500 });
 			}
 			const environment = url.searchParams.get("environmentId") ?? "";
 			const page = (key: string, items: unknown[]) =>
@@ -104,6 +110,7 @@ beforeEach(() => {
 		postgres: { "evm-shop": [{ id: "dpg-db", name: "vibe-demo-shop-db" }] },
 		deleteStatus: {},
 		syncStates: ["success"],
+		readFailures: {},
 	};
 	serve();
 });
@@ -148,6 +155,17 @@ describe("deleteAppResources", () => {
 			"vibe-demo-shop-web",
 		);
 		expect(deleted).toContain("/projects/prj-shop");
+	});
+
+	// One failed read must not end the delete as delete_failed.
+	it("reads the projects and resources again after a temporary failure", async () => {
+		workspace.readFailures = { "/projects": 1, "/services": 1 };
+
+		expect(await settle(deleteAppResources(APP, OPTIONS))).toEqual([
+			"vibe-demo-shop-web",
+			"vibe-demo-shop-api",
+			"vibe-demo-shop-db",
+		]);
 	});
 });
 
