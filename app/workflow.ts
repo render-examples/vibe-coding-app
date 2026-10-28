@@ -136,6 +136,7 @@ async function run(
 
 	const sandbox = await createSandbox({
 		timeoutSeconds: SANDBOX_TIMEOUT_SECONDS,
+		egress: factoryConfig.sandbox.buildEgress,
 	});
 	try {
 		await recordSandbox(runId, sandbox);
