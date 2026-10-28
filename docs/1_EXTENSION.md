@@ -272,7 +272,10 @@ The demo script reads `FACTORY_GATEWAY_URL` and `FACTORY_USER`.
 `PORT` configures the gateway and defaults to `3000`.
 
 Keep model and GitHub credentials off the gateway. Keep the GitHub credential
-out of every task input and every Sandbox an agent can use.
+out of every task input and every Sandbox an agent can use. In
+[`render.yaml`](../render.yaml), a new secret for both services goes in the
+`vibe-factory-shared` environment group, and a workflow-only secret goes in
+`vibe-factory-workflow-secrets`.
 
 ## Change checklist
 

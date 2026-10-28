@@ -110,9 +110,8 @@ paid plans and bill until you delete the app.
 
 Click **Deploy to Render** above, or create a Blueprint from this repository's
 `render.yaml`. It creates the gateway, the workflow service, and their database
-in a `vibe-factory` project, and prompts you for the secrets. If you deploy
-from a fork, first change the `repo:` field of the workflow service in
-`render.yaml` to your fork's URL. [docs/0_QUICKSTART.md](docs/0_QUICKSTART.md#deploy-the-factory-to-render)
+in a `vibe-factory` project, and prompts you once for each secret.
+[docs/0_QUICKSTART.md](docs/0_QUICKSTART.md#deploy-the-factory-to-render)
 has the full steps.
 
 ## Documentation

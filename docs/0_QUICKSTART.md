@@ -172,9 +172,16 @@ the [README](../README.md). Fill in the prompted values listed under
 [Prerequisites](#prerequisites). `UI_PASSWORD` must contain at least 16
 characters or the gateway will refuse to start.
 
-If you deploy a fork, first change the workflow service's `repo:` field in
-`render.yaml` to the fork URL. Otherwise Render builds the upstream workflow
-code even though the Blueprint came from your fork.
+The secrets live in two environment groups, so you enter each one once:
+
+- `vibe-factory-shared` holds `RENDER_API_KEY` and is attached to both
+  services.
+- `vibe-factory-workflow-secrets` holds `APPS_REPO`, `RENDER_WORKSPACE_ID`,
+  `ANTHROPIC_API_KEY`, and the GitHub credential, and is attached only to the
+  workflow service.
+
+To rotate a key, change it in its group. Both services build from the
+repository that holds the Blueprint, so a fork runs its own code.
 
 Keep these deployment constraints:
 
@@ -210,7 +217,8 @@ create a local `.env` from the deployed resources:
 1. Copy `.env.example` to `.env`.
 2. From `vibe-factory-gateway`, copy `FACTORY_API_KEY`, `UI_USERNAME`,
    `UI_PASSWORD`, and `RENDER_WORKFLOW_SLUG`.
-3. From `vibe-factory-workflows`, copy `APPS_REPO`, `RENDER_API_KEY`,
+3. From the `vibe-factory-shared` environment group, copy `RENDER_API_KEY`.
+   From `vibe-factory-workflow-secrets`, copy `APPS_REPO`,
    `RENDER_WORKSPACE_ID`, `ANTHROPIC_API_KEY`, and either `GITHUB_TOKEN` or
    the three `GITHUB_APP_*` values.
 4. Open `vibe-factory-db` in the Dashboard and copy its **external**

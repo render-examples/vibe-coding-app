@@ -40,8 +40,9 @@ Environment gotchas:
   host also loads `.env` and must use the real Render API.
 - Keep network isolation off in the factory's environment. An isolated
   workflow cannot reach the database on the private network.
-- The workflow service in `render.yaml` sets `repo:` to the upstream
-  repository. A fork must change it.
+- Secrets in `render.yaml` live in two environment groups. Attach
+  `vibe-factory-workflow-secrets` only to the workflow service: it holds the
+  model key and the GitHub credential.
 
 ## Module map
 
