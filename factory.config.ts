@@ -25,6 +25,13 @@ export interface FactoryConfig {
 		databasePlan: string;
 		postgresMajorVersion: string;
 	};
+	sandbox: {
+		/**
+		 * Hosts the build sandbox can reach, over HTTPS only. The agent's code
+		 * runs there, so this is everything that code can talk to.
+		 */
+		buildEgress: string[];
+	};
 	assets: {
 		/** Hosts that the image download accepts. Nothing else is reachable. */
 		allowedHosts: string[];
@@ -50,6 +57,12 @@ export const factoryConfig: FactoryConfig = {
 		servicePlan: "0.5c-512mb",
 		databasePlan: "0.1c-256mb",
 		postgresMajorVersion: "18",
+	},
+	sandbox: {
+		// npm installs, then the two apt mirrors the sandbox's own Postgres
+		// installs from. A stack that downloads from anywhere else needs its
+		// host added here.
+		buildEgress: ["registry.npmjs.org", "deb.debian.org", "apt.postgresql.org"],
 	},
 	assets: {
 		// Commons serves thumbnails from both hosts, mixed within one response.

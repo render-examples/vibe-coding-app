@@ -197,6 +197,11 @@ The enclosing Git repository has no remote. The Sandbox receives no GitHub
 token. The builder may execute arbitrary shell commands, so the absence of
 credentials and unrelated source is the real boundary.
 
+The Sandbox can also reach only the hosts in
+`factoryConfig.sandbox.buildEgress`, over HTTPS: the npm registry and the two
+apt mirrors its Postgres installs from. `createSandbox()` requires an egress
+list and refuses a Sandbox whose reported policy admits more.
+
 When the plan includes them, trusted workflow code:
 
 - installs a real Postgres inside the Sandbox;
@@ -238,8 +243,8 @@ The workflow turns the verified manifest into an `AppSpec`, which becomes
 1. `readAppFiles()` packs only commit-visible files from the build Sandbox.
 2. `appFiles()` accepts regular files with safe relative paths under a 50 MB
    total cap.
-3. `inAppsClone()` creates a fresh Sandbox, obtains a short-lived GitHub
-   credential, and clones the apps repository.
+3. `inAppsClone()` creates a fresh Sandbox that can reach only `github.com`,
+   obtains a short-lived GitHub credential, and clones the apps repository.
 4. Trusted code writes the app files, `factory.json`, the app-local
    `render.yaml`, and a regenerated repository-root `render.yaml`.
 5. Git stages only `apps/<user>/<app>/` and the root Blueprint.
@@ -460,11 +465,14 @@ The important boundaries are:
 - **Gateway → workflow:** only `{ prompt, user, runId }`, validated again.
 - **Agent → machine:** explicit tools, pre-tool policy, scoped paths, and a
   credential-free Sandbox.
+- **Agent code → network:** HTTPS to the `buildEgress` hosts only. DNS
+  lookups still leave the Sandbox, so a determined program could signal out
+  through them, but it holds no credential to leak.
 - **Agent → Render:** read-only MCP allowlist; no direct log access.
 - **Agent output → workflow:** schema validation and deterministic pass/fail
   checks.
 - **Build Sandbox → GitHub:** regular-file transfer as untrusted data, then a
-  clean credentialed publish Sandbox.
+  clean credentialed publish Sandbox that can reach only `github.com`.
 - **Workflow → infrastructure:** validated Blueprint creation; scoped API
   deletion only after the app leaves the Blueprint.
 

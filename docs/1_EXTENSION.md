@@ -21,6 +21,9 @@ publishing, or deletion boundaries. The canonical safety invariants live in
 - `render.region`: region for generated services and databases.
 - `render.servicePlan` and `render.databasePlan`: generated resource plans.
 - `render.postgresMajorVersion`: generated Postgres version.
+- `sandbox.buildEgress`: the only hosts the build Sandbox can reach, over
+  HTTPS. Add a host when a generated stack downloads from somewhere other
+  than the npm registry; its install fails without it.
 - `assets.allowedHosts`, `maxBytes`, and `imageWidth`: image download policy.
 - `maxConcurrentRuns`: global number of app builds the gateway may accept.
 - `models`: concrete model ID for the `medium` and `large` tiers.

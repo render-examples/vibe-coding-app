@@ -15,9 +15,7 @@ export function shellEscape(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-type SandboxesClient = InstanceType<
-	typeof Render
->["experimental"]["sandboxes"];
+type SandboxesClient = InstanceType<typeof Render>["sandboxes"];
 
 export type UploadData = Buffer | Uint8Array | string | Readable;
 
@@ -32,6 +30,11 @@ export interface ExecResult {
 
 export interface CreateSandboxOptions {
 	timeoutSeconds?: number;
+	/**
+	 * The only hosts the sandbox can reach, over HTTPS. Required, so that no
+	 * sandbox gets Render's default of unrestricted egress.
+	 */
+	egress: readonly string[];
 }
 
 let cached: { client: SandboxesClient; ownerId?: `tea-${string}` } | undefined;
@@ -46,7 +49,7 @@ function api(): { client: SandboxesClient; ownerId?: `tea-${string}` } {
 			useLocalDev: false,
 			baseUrl: "https://api.render.com",
 		});
-		cached = { client: render.experimental.sandboxes, ownerId };
+		cached = { client: render.sandboxes, ownerId };
 	}
 	return cached;
 }
@@ -113,13 +116,30 @@ export class Sandbox {
 }
 
 export async function createSandbox(
-	opts?: CreateSandboxOptions,
+	opts: CreateSandboxOptions,
 ): Promise<Sandbox> {
 	const { client, ownerId } = api();
-	const created = await client.create({
-		ownerId,
-		timeoutSeconds: opts?.timeoutSeconds,
-	});
+	let created: Awaited<ReturnType<SandboxesClient["create"]>>;
+	try {
+		created = await client.create({
+			ownerId,
+			timeoutSeconds: opts.timeoutSeconds,
+			networkPolicy: {
+				type: "allow-list",
+				rules: opts.egress.map((domain) => ({ domain })),
+			},
+		});
+	} catch (error) {
+		throw new Error(
+			`Render refused a sandbox that can reach only ${opts.egress.join(", ")}. The workspace may not support allow-list egress yet: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	const wider = widerEgress(created.networkPolicy, opts.egress);
+	if (wider) {
+		await client.terminate(created.id, ownerId).catch(() => {});
+		throw new Error(`Sandbox ${created.id} refused: ${wider}`);
+	}
 
 	const deadline = Date.now() + READY_TIMEOUT_MS;
 	while (Date.now() < deadline) {
@@ -136,6 +156,23 @@ export async function createSandbox(
 	throw new Error(
 		`Sandbox ${created.id} was not ready within ${READY_TIMEOUT_MS}ms`,
 	);
+}
+
+/**
+ * Why the policy Render reports admits more than `requested`, or null. A
+ * sandbox the factory did not ask for could reach hosts nobody reviewed.
+ */
+export function widerEgress(
+	policy: { type: string; rules?: { domain: string }[] } | undefined,
+	requested: readonly string[],
+): string | null {
+	if (policy?.type !== "allow-list") {
+		return `its network policy is ${policy?.type ?? "unknown"}, not allow-list`;
+	}
+	const extra = (policy.rules ?? [])
+		.map((rule) => rule.domain)
+		.filter((domain) => !requested.includes(domain));
+	return extra.length > 0 ? `it can also reach ${extra.join(", ")}` : null;
 }
 
 /** Agent tasks receive a sandbox id from workflow code, never a model. */
@@ -168,9 +205,19 @@ const START_POSTGRES = `
 set -e
 
 # psql ships in the image; the server does not.
+#
+# The image's apt sources use plain HTTP, and the sandbox's allow-list drops
+# everything that is not HTTPS. So apt reads only these two sources, over
+# HTTPS, from hosts in factoryConfig.sandbox.buildEgress.
 if ! command -v pg_ctlcluster >/dev/null 2>&1; then
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/tmp/pg-install.log 2>&1
+  codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  cat >/tmp/pg-apt.list <<EOF
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian $codename main
+deb https://apt.postgresql.org/pub/repos/apt $codename-pgdg main
+EOF
+  apt_sources="-o Dir::Etc::SourceList=/tmp/pg-apt.list -o Dir::Etc::SourceParts=-"
+  apt-get $apt_sources update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get $apt_sources install -y -qq postgresql >/tmp/pg-install.log 2>&1
 fi
 
 version="$(ls /etc/postgresql | sort -n | tail -1)"

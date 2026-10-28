@@ -223,7 +223,11 @@ export async function inAppsClone<T>(
 	work: (clone: AppsClone) => Promise<T>,
 ): Promise<T> {
 	const repo = appsRepo();
-	const sandbox = await createSandbox({ timeoutSeconds });
+	// githubRemoteUrl in git.ts always clones from github.com.
+	const sandbox = await createSandbox({
+		timeoutSeconds,
+		egress: ["github.com"],
+	});
 	try {
 		const token = await githubToken();
 		const remoteUrl = await cloneAppsRepo(

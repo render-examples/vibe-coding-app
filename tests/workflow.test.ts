@@ -232,6 +232,7 @@ let ran: { name: string; input: unknown }[];
  * Render, the input and the result go through JSON.
  */
 const tasks: TaskContext = {
+	metadata: {},
 	run: async (task, ...args) => {
 		ran.push({ name: task.name, input: args[0] });
 		return wire(await task.func(tasks, ...wire(args)));
@@ -590,6 +591,10 @@ describe("promptToApp", () => {
 			siteOnly,
 		);
 		expect(runSandbox.terminate).toHaveBeenCalled();
+		// The agent's sandbox reaches installs only; the token's reaches GitHub only.
+		expect(
+			mocks.createSandbox.mock.calls.map(([options]) => options.egress),
+		).toEqual([factoryConfig.sandbox.buildEgress, ["github.com"]]);
 	});
 
 	it("starts a plan with a web service from the fullstack template and a sandbox Postgres", async () => {
