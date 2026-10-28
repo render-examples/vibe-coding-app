@@ -21,6 +21,15 @@ jobs:
       - run: npm ci
       - run: npm run check
 
+  # `render blueprints validate` needs a Render login, which a fork's pull
+  # request cannot have. The published schema catches the same shape errors.
+  blueprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run check-jsonschema --schemafile https://render.com/schema/render.yaml.json render.yaml
+
   # A template nobody builds is a template that quietly stops building, and the
   # first thing to notice would be a customer's failed run.
   templates:
