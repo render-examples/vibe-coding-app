@@ -229,7 +229,7 @@ describe("browser UI", () => {
 	const pages = ["/", "/app.js"];
 
 	it("requires Basic Auth for every UI file and route, and serves no file that holds FACTORY_API_KEY", async () => {
-		for (const path of [...pages, "/style.css", "/ui/apps"]) {
+		for (const path of [...pages, "/style.css", "/favicon.svg", "/ui/apps"]) {
 			expect((await request(path)).status, path).toBe(401);
 		}
 		for (const path of pages) {

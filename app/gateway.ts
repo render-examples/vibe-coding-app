@@ -106,6 +106,7 @@ export function createGateway(): Hono {
 	app.get("/", ...uiFile("index.html"));
 	app.get("/app.js", ...uiFile("app.js"));
 	app.get("/style.css", ...uiFile("style.css"));
+	app.get("/favicon.svg", ...uiFile("favicon.svg"));
 
 	return app;
 }
