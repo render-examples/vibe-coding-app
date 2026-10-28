@@ -15,9 +15,11 @@ Before you deploy, prepare:
 
 - a Render workspace with Workflows and
   [Sandboxes early access](https://render.com/docs/sandboxes);
-- an empty GitHub repository for generated apps, with Render's GitHub app
-  installed on it;
-- a GitHub App or fine-grained token with Contents: write on that repository;
+- an empty GitHub repository for generated apps, with the
+  [Render GitHub app](https://github.com/apps/render) installed on it so
+  Render can read the repository for Blueprint sync;
+- a separate GitHub App or fine-grained token with Contents: write on that
+  repository, which the factory uses to push generated apps;
 - Anthropic and Render API keys, plus the Render workspace ID; and
 - a lowercase UI username and a UI password of at least 16 characters.
 
@@ -91,8 +93,8 @@ product: see [Current limitations](docs/0_QUICKSTART.md#current-limitations).
   and the workspace ID (it starts with `tea-`)
 - An Anthropic API key
 - An empty GitHub repository for generated apps
-- A GitHub connection in Render with access to that repository, so its
-  Blueprint can sync
+- The [Render GitHub app](https://github.com/apps/render) installed on that
+  repository, so Render can read it for Blueprint sync
 - A credential that can push to the repository: a fine-grained personal
   access token or a GitHub App, with Contents: write on that repository
 
