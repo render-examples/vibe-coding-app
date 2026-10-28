@@ -29,10 +29,11 @@ const SCRATCH_DIR = "/tmp";
  *
  * The list has no log tool: logs can hold secrets, and no code can redact
  * what an agent reads. Workflow code gives the builder redacted deploy logs.
+ *
+ * It has no workspace tool either. pinRenderWorkspace names the workspace in
+ * every call, so each tool here must accept `workspaceId`.
  */
 export const RENDER_READ_ONLY_TOOLS = [
-	"list_workspaces",
-	"get_selected_workspace",
 	"list_services",
 	"get_service",
 	"list_deploys",
@@ -78,6 +79,21 @@ export function checkToolCall(
 
 export function isRenderReadOnlyTool(name: string): boolean {
 	return (RENDER_READ_ONLY_TOOLS as readonly string[]).includes(name);
+}
+
+/**
+ * The input of a Render tool call, set to read the factory's workspace, or
+ * undefined for any other tool. The server fails a call that names no
+ * workspace with "no workspace selected" when the API key can reach more
+ * than one, and an agent-chosen workspace could be the wrong one.
+ */
+export function pinRenderWorkspace(
+	name: string,
+	input: Record<string, unknown>,
+	workspaceId: string,
+): Record<string, unknown> | undefined {
+	if (!name.startsWith(RENDER_PREFIX)) return undefined;
+	return { ...input, workspaceId };
 }
 
 export type ResolvedPath = { path: string } | { error: string };
