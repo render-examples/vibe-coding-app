@@ -7,8 +7,12 @@ import {
 import type { ModelUsage, Options } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { ModelTier } from "../factory.config.js";
-import { requireEnv } from "./config.js";
-import { checkToolCall, RENDER_MCP_SERVER } from "./policy.js";
+import { renderWorkspaceId, requireEnv } from "./config.js";
+import {
+	checkToolCall,
+	pinRenderWorkspace,
+	RENDER_MCP_SERVER,
+} from "./policy.js";
 import { renderMcpUrl } from "./render.js";
 import type { Sandbox } from "./sandbox.js";
 import type { Tool, ToolResult } from "./tools.js";
@@ -88,6 +92,7 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeRun> {
 	}
 
 	const renderTools = opts.renderTools ?? [];
+	const workspaceId = renderTools.length > 0 ? renderWorkspaceId() : undefined;
 	const allowed = [
 		...tools.map((tool) => `mcp__${MCP_SERVER}__${tool.name}`),
 		...renderTools.map((name) => `mcp__${RENDER_MCP_SERVER}__${name}`),
@@ -106,7 +111,7 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeRun> {
 		env: Object.fromEntries(
 			ENV_ALLOWLIST.map((name) => [name, process.env[name]]),
 		),
-		hooks: { PreToolUse: [{ hooks: [policyHook(workDir)] }] },
+		hooks: { PreToolUse: [{ hooks: [policyHook(workDir, workspaceId)] }] },
 	};
 
 	if (opts.outputSchema) {
@@ -227,19 +232,23 @@ function bareToolName(name: string): string {
 	return name.startsWith(prefix) ? name.slice(prefix.length) : name;
 }
 
-/** The PreToolUse hook. Tool paths must land in `workDir` or in /tmp. */
-function policyHook(workDir: string | undefined) {
+/**
+ * The PreToolUse hook. Tool paths must land in `workDir` or in /tmp, and a
+ * Render tool call reads `workspaceId`.
+ */
+function policyHook(
+	workDir: string | undefined,
+	workspaceId: string | undefined,
+) {
 	return async (input: {
 		hook_event_name: string;
 		tool_name?: string;
 		tool_input?: unknown;
 	}) => {
 		if (input.hook_event_name !== "PreToolUse") return {};
-		const reason = checkToolCall(
-			bareToolName(input.tool_name ?? ""),
-			isRecord(input.tool_input) ? input.tool_input : {},
-			workDir,
-		);
+		const name = bareToolName(input.tool_name ?? "");
+		const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
+		const reason = checkToolCall(name, toolInput, workDir);
 		return {
 			hookSpecificOutput: reason
 				? {
@@ -250,6 +259,9 @@ function policyHook(workDir: string | undefined) {
 				: {
 						hookEventName: "PreToolUse" as const,
 						permissionDecision: "allow" as const,
+						updatedInput: workspaceId
+							? pinRenderWorkspace(name, toolInput, workspaceId)
+							: undefined,
 					},
 		};
 	};

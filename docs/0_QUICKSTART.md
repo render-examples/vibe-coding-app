@@ -22,7 +22,9 @@ You need:
 - A Render API key and that workspace's ID (`tea-...`).
 - An Anthropic API key.
 - An empty GitHub repository for generated apps (the **apps repository**).
-- A GitHub connection in Render that can read the apps repository.
+- The [Render GitHub app](https://github.com/apps/render) installed on the
+  apps repository, so Render can read it for Blueprint sync. This is not the
+  push credential below.
 - A credential that can push to the apps repository:
   - a fine-grained personal access token with Contents: write, or
   - a GitHub App installed on the repository with Contents: write.

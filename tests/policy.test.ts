@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { checkToolCall, redactSecrets } from "../app/policy.js";
+import {
+	checkToolCall,
+	pinRenderWorkspace,
+	redactSecrets,
+} from "../app/policy.js";
 
 const APP_DIR = "/home/user/repo/apps/demo/shop";
 
@@ -65,6 +69,28 @@ describe("checkToolCall", () => {
 				content: 'import { api } from "../../../../etc/api";\n',
 			}),
 		).toBeNull();
+	});
+});
+
+describe("pinRenderWorkspace", () => {
+	// With a key that reaches several workspaces, a call without one fails.
+	it("names the factory's workspace in every Render tool call, over the agent's choice", () => {
+		expect(
+			pinRenderWorkspace("mcp__render__list_services", {}, "tea-factory"),
+		).toEqual({ workspaceId: "tea-factory" });
+		expect(
+			pinRenderWorkspace(
+				"mcp__render__get_service",
+				{ serviceId: "srv-1", workspaceId: "tea-other" },
+				"tea-factory",
+			),
+		).toEqual({ serviceId: "srv-1", workspaceId: "tea-factory" });
+	});
+
+	it("leaves the input of other tools alone", () => {
+		expect(
+			pinRenderWorkspace("sandbox__exec", { command: "ls" }, "tea-factory"),
+		).toBeUndefined();
 	});
 });
 

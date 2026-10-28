@@ -294,7 +294,8 @@ async function checkBlueprint(): Promise<void> {
 
 /**
  * The architect reads Render through the MCP server. If the server lacks a
- * tool on the allowlist, the architect silently loses it.
+ * tool on the allowlist, or the tool cannot name a workspace, the architect
+ * silently loses it.
  */
 async function checkRenderMcp(): Promise<void> {
 	heading("Render MCP");
@@ -312,27 +313,58 @@ async function checkRenderMcp(): Promise<void> {
 				requestInit: { headers: { authorization: `Bearer ${apiKey}` } },
 			}),
 		);
-		const tools = new Set<string>();
+		const tools = new Map<string, string[]>();
 		let cursor: string | undefined;
 		do {
 			const page = await client.listTools({ cursor });
-			for (const tool of page.tools) tools.add(tool.name);
+			for (const tool of page.tools) {
+				tools.set(tool.name, Object.keys(tool.inputSchema.properties ?? {}));
+			}
 			cursor = page.nextCursor;
 		} while (cursor);
 
 		const missing = RENDER_READ_ONLY_TOOLS.filter((name) => !tools.has(name));
+		const unpinnable = RENDER_READ_ONLY_TOOLS.filter(
+			(name) => tools.has(name) && !tools.get(name)?.includes("workspaceId"),
+		);
 		record(
-			missing.length === 0
+			missing.length > 0
 				? {
-						level: "ok",
-						message: `MCP reachable, with the ${RENDER_READ_ONLY_TOOLS.length} read-only tools that the agents use`,
-					}
-				: {
 						level: "fail",
 						message: `The Render MCP server has no tool named ${missing.join(", ")}`,
 						fix: "Change RENDER_READ_ONLY_TOOLS in app/policy.ts to the names that the server uses.",
-					},
+					}
+				: unpinnable.length > 0
+					? {
+							level: "fail",
+							message: `These Render MCP tools take no workspaceId: ${unpinnable.join(", ")}`,
+							fix: "Remove them from RENDER_READ_ONLY_TOOLS in app/policy.ts. Without a workspace, a call fails or reads the wrong one.",
+						}
+					: {
+							level: "ok",
+							message: `MCP reachable, with the ${RENDER_READ_ONLY_TOOLS.length} read-only tools that the agents use`,
+						},
 		);
+
+		const workspaceId = process.env.RENDER_WORKSPACE_ID?.trim();
+		if (workspaceId) {
+			const result = await client.callTool({
+				name: "list_services",
+				arguments: { workspaceId },
+			});
+			record(
+				result.isError
+					? {
+							level: "fail",
+							message: `The Render MCP server cannot read workspace ${workspaceId}`,
+							fix: "Use a RENDER_API_KEY that can reach RENDER_WORKSPACE_ID.",
+						}
+					: {
+							level: "ok",
+							message: `The Render MCP server reads workspace ${workspaceId}`,
+						},
+			);
+		}
 	} catch (error) {
 		record({
 			level: "fail",
