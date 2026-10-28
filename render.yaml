@@ -13,6 +13,36 @@ projects:
         networking:
           isolation: disabled
 
+        # Secrets you enter once when the Blueprint is created, and rotate in
+        # one place. The gateway gets only vibe-factory-shared: the model key
+        # and the GitHub credential must never reach it.
+        envVarGroups:
+          - name: vibe-factory-shared
+            envVars:
+              # The gateway starts workflow tasks with it. The workflows host
+              # uses it for Sandboxes, the Render MCP server, Blueprint reads,
+              # and the deletes of a deleted app's resources.
+              - key: RENDER_API_KEY
+                sync: false
+          - name: vibe-factory-workflow-secrets
+            envVars:
+              - key: APPS_REPO
+                sync: false
+              - key: RENDER_WORKSPACE_ID
+                sync: false
+              - key: ANTHROPIC_API_KEY
+                sync: false
+              # Set the three GitHub App variables or GITHUB_TOKEN. Each option
+              # needs Contents: write on APPS_REPO.
+              - key: GITHUB_APP_ID
+                sync: false
+              - key: GITHUB_APP_PRIVATE_KEY
+                sync: false
+              - key: GITHUB_APP_INSTALLATION_ID
+                sync: false
+              - key: GITHUB_TOKEN
+                sync: false
+
         databases:
           - name: vibe-factory-db
             plan: 0.1c-256mb
@@ -43,16 +73,15 @@ projects:
                   type: workflow
                   name: vibe-factory-workflows
                   property: slug
-              # Used by the Render SDK to start the workflow task.
-              - key: RENDER_API_KEY
-                sync: false
+              - fromGroup: vibe-factory-shared
 
           # Runs every task that app/host.ts registers. The model key and the
-          # GitHub credential are set only here, never on the gateway.
+          # GitHub credential are set only here, never on the gateway. With no
+          # repo field, it builds the repository that holds this Blueprint, so
+          # a fork's workflow runs the fork's code.
           - type: workflow
             name: vibe-factory-workflows
             runtime: node
-            repo: https://github.com/render-examples/vibe-coding-app
             # A workflow must set its region. Task runs connect to the database
             # on the private network, and that network does not cross regions.
             # Use the same region as the database, which is oregon by default.
@@ -64,23 +93,5 @@ projects:
                 fromDatabase:
                   name: vibe-factory-db
                   property: connectionString
-              - key: APPS_REPO
-                sync: false
-              # Sandboxes, the Render MCP server, Blueprint reads, and the
-              # deletes of a deleted app's resources.
-              - key: RENDER_API_KEY
-                sync: false
-              - key: RENDER_WORKSPACE_ID
-                sync: false
-              - key: ANTHROPIC_API_KEY
-                sync: false
-              # Set the three GitHub App variables or GITHUB_TOKEN. Each option
-              # needs Contents: write on APPS_REPO.
-              - key: GITHUB_APP_ID
-                sync: false
-              - key: GITHUB_APP_PRIVATE_KEY
-                sync: false
-              - key: GITHUB_APP_INSTALLATION_ID
-                sync: false
-              - key: GITHUB_TOKEN
-                sync: false
+              - fromGroup: vibe-factory-shared
+              - fromGroup: vibe-factory-workflow-secrets
